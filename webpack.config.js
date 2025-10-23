@@ -7,7 +7,7 @@ const webpack = require('webpack');
 module.exports = {
   mode: 'development',
   entry: {
-    popup: './src/index.tsx',
+    popup: './src/popup.ts',
     content: './src/content.tsx',
     background: './src/background.ts',
   },
@@ -32,7 +32,10 @@ module.exports = {
   },
   plugins: [
     new CopyPlugin({
-      patterns: [{ from: 'assets', to: '.' }],
+      patterns: [
+        { from: 'assets', to: '.' },
+        { from: 'src/popup.html', to: 'popup.html' }
+      ],
     }),
     new webpack.DefinePlugin({
       'process.env.GEMINI_API_KEY': JSON.stringify(process.env.GEMINI_API_KEY),

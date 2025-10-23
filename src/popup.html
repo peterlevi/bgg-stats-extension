@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 300px;
+      padding: 16px;
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      margin: 0;
+    }
+
+    .main-button {
+      width: 100%;
+      padding: 12px 16px;
+      font-size: 16px;
+      font-weight: bold;
+      background-color: #0066cc;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-bottom: 16px;
+      transition: background-color 0.2s;
+    }
+
+    .main-button:hover:not(:disabled) {
+      background-color: #0052a3;
+    }
+
+    .main-button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .main-button.hide-mode {
+      background-color: #cc0000;
+    }
+
+    .main-button.hide-mode:hover:not(:disabled) {
+      background-color: #a30000;
+    }
+
+    .option {
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+    }
+
+    .option label {
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .option input[type="checkbox"] {
+      margin-right: 8px;
+      cursor: pointer;
+      width: 16px;
+      height: 16px;
+    }
+  </style>
+</head>
+<body>
+  <button id="mainButton" class="main-button">Show game stats</button>
+
+  <div class="option">
+    <label>
+      <input type="checkbox" id="autoRunCheckbox">
+      Always run on this domain
+    </label>
+  </div>
+
+  <div class="option">
+    <label>
+      <input type="checkbox" id="caseInsensitiveCheckbox">
+      Case-insensitive matching on this domain
+    </label>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

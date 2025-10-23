@@ -13,12 +13,45 @@ interface GameData {
 let gameNameMap: Map<string, GameData> | null = null;
 let mutationObserver: MutationObserver | null = null;
 let isProcessing = false;
+let isExtensionModifying = false; // New flag to ignore our own modifications
 let mutationTimeout: NodeJS.Timeout | null = null;
 let pendingElements: Element[] = [];
+let useCaseInsensitive: boolean = true; // Default to true since we added the 'i' flag
+let statsShown: boolean = false; // Track whether stats are currently shown
+
+// Storage keys
+const CASE_INSENSITIVE_DOMAINS_KEY = "bggCaseInsensitiveDomains";
+const EXTENSION_WORKING_KEY = "bggExtensionWorking";
+
+// Helper function to notify popup/background of working state
+function notifyWorkingState(working: boolean) {
+  try {
+    chrome.runtime.sendMessage({
+      action: "setWorkingState",
+      working: working
+    }).catch((error) => {
+      // Ignore errors if popup is not open
+      console.log('Could not notify working state (popup may be closed):', error);
+    });
+  } catch (error) {
+    console.error("Error notifying working state:", error);
+  }
+}
 
 // Helper function to escape special regex characters
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Helper function to create a regex pattern that handles punctuation in game names
+function createGameNameRegex(gameName: string): RegExp {
+  const escapedName = escapeRegex(gameName);
+  // Use a more flexible boundary that works with punctuation
+  // Match if preceded by start of string, whitespace, or punctuation
+  // and followed by end of string, whitespace, or punctuation
+  // Use case-insensitive flag if enabled
+  const flags = useCaseInsensitive ? 'gi' : 'g';
+  return new RegExp(`(?:^|\\s|[.!?,:;'"()\\[\\]{}])${escapedName}(?=$|\\s|[.!?,:;'"()\\[\\]{}])`, flags);
 }
 
 // Helper function to create hexagon badge
@@ -73,8 +106,7 @@ async function processElementForGames(
   const foundGames: GameData[] = [];
   for (const [gameName, gameData] of gameNameMap) {
     try {
-      const escapedName = escapeRegex(gameName);
-      const regex = new RegExp(`\\b${escapedName}\\b`, 'g');
+      const regex = createGameNameRegex(gameName);
       if (regex.test(pageText)) {
         foundGames.push(gameData);
       }
@@ -92,8 +124,7 @@ async function processElementForGames(
 
   for (const game of sortedGames) {
     try {
-      const escapedName = escapeRegex(game.name);
-      const regex = new RegExp(`\\b${escapedName}\\b`, 'g');
+      const regex = createGameNameRegex(game.name);
 
       const walker = document.createTreeWalker(
         element,
@@ -201,6 +232,7 @@ async function processPendingElements() {
   }
 
   isProcessing = true;
+  isExtensionModifying = true; // Set flag before starting modifications
   const elementsToProcess = [...pendingElements];
   pendingElements = [];
 
@@ -229,11 +261,8 @@ async function processPendingElements() {
   try {
     let totalBadgesAdded = 0;
 
-    // Disconnect observer to prevent our changes from triggering it
-    const wasObserving = mutationObserver !== null;
-    if (mutationObserver) {
-      mutationObserver.disconnect();
-    }
+    // Don't disconnect observer, just let the flag handle ignoring mutations
+    // This is more efficient than constantly disconnecting/reconnecting
 
     // Process elements with yielding to keep browser responsive
     for (let i = 0; i < elementsToProcess.length; i++) {
@@ -246,19 +275,11 @@ async function processPendingElements() {
       const badgesAdded = await processElementForGames(element);
       totalBadgesAdded += badgesAdded;
 
-      // Yield to browser every 3 elements
-      if (i % 3 === 0 && i > 0) {
+      // Yield to browser every element to prevent freezing
+      if (i > 0) {
         messageDiv.textContent = `Processing new content... (${i + 1}/${elementsToProcess.length})`;
         await new Promise(resolve => setTimeout(resolve, 0));
       }
-    }
-
-    // Reconnect observer
-    if (wasObserving && mutationObserver) {
-      mutationObserver.observe(document.body, {
-        childList: true,
-        subtree: true,
-      });
     }
 
     if (totalBadgesAdded > 0) {
@@ -278,6 +299,10 @@ async function processPendingElements() {
     }, 3000);
   } finally {
     isProcessing = false;
+    // Wait a bit before clearing the flag to ensure all mutations from our changes are caught
+    setTimeout(() => {
+      isExtensionModifying = false;
+    }, 100);
   }
 }
 
@@ -297,30 +322,55 @@ function setupMutationObserver() {
   }
 
   mutationObserver = new MutationObserver((mutations) => {
-    if (!gameNameMap || gameNameMap.size === 0) {
+    // Ignore all mutations while extension is actively modifying the DOM
+    if (isExtensionModifying || !gameNameMap || gameNameMap.size === 0) {
       return;
     }
+
+    let hasNewElements = false;
 
     for (const mutation of mutations) {
       if (mutation.type === 'childList') {
         mutation.addedNodes.forEach((node) => {
           if (node.nodeType === Node.ELEMENT_NODE) {
             const element = node as Element;
+
+            // Skip if it's one of our own elements
             if (
               element.hasAttribute('data-bgg-rating-badge') ||
               element.hasAttribute('data-bgg-wrapper') ||
               element.hasAttribute('data-bgg-message') ||
-              element.closest('[data-bgg-wrapper]')
+              element.hasAttribute('data-bgg-tooltip') ||
+              element.closest('[data-bgg-wrapper]') ||
+              element.closest('[data-bgg-tooltip]')
             ) {
               return;
             }
-            pendingElements.push(element);
+
+            // Skip if it contains our markers (this means we just modified it)
+            if (
+              element.querySelector('[data-bgg-rating-badge]') ||
+              element.querySelector('[data-bgg-wrapper]')
+            ) {
+              return;
+            }
+
+            // Only add if it has text content that might contain game names
+            if (element.textContent && element.textContent.trim().length > 0) {
+              pendingElements.push(element);
+              hasNewElements = true;
+            }
           }
         });
       }
     }
 
-    // Throttle: wait 500ms after last mutation
+    // Only set timeout if we actually found new elements
+    if (!hasNewElements) {
+      return;
+    }
+
+    // Throttle: wait 1000ms after last mutation (increased from 500ms)
     if (mutationTimeout) {
       clearTimeout(mutationTimeout);
     }
@@ -328,7 +378,7 @@ function setupMutationObserver() {
     mutationTimeout = setTimeout(() => {
       mutationTimeout = null;
       processPendingElements();
-    }, 500);
+    }, 1000);
   });
 
   mutationObserver.observe(document.body, {
@@ -369,6 +419,9 @@ async function runExtension() {
     } catch (e) {
       console.error('Content: Error sending getBggData message:', e);
       messageDiv.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
+      setTimeout(() => {
+        messageDiv.style.display = 'none';
+      }, 3000);
       return;
     }
 
@@ -390,7 +443,7 @@ async function runExtension() {
           })
           .catch((e) => console.error('Content: Error during async update:', e));
       } else {
-        messageDiv.textContent = 'BGG data not found. Fetching now...';
+        messageDiv.textContent = 'Fetching game data from BGG...';
         console.log('Content: Fetching BGG data from background...');
         const fetchResponse = await chrome.runtime.sendMessage({
           action: 'fetchBggData',
@@ -407,6 +460,9 @@ async function runExtension() {
     if (!currentBggData || currentBggData.length === 0) {
       console.error('Content: currentBggData is still empty after fetch attempt');
       messageDiv.textContent = 'BGG data not available. Please try again later.';
+      setTimeout(() => {
+        messageDiv.style.display = 'none';
+      }, 3000);
       return;
     }
 
@@ -429,8 +485,7 @@ async function runExtension() {
 
     for (const [gameName, gameData] of gameNameMap) {
       try {
-        const escapedName = escapeRegex(gameName);
-        const regex = new RegExp(`\\b${escapedName}\\b`, 'g');
+        const regex = createGameNameRegex(gameName);
         if (regex.test(pageText)) {
           foundGames.push(gameData);
         }
@@ -456,8 +511,7 @@ async function runExtension() {
     // Process games and add badges
     for (const game of sortedGames) {
       try {
-        const escapedName = escapeRegex(game.name);
-        const regex = new RegExp(`\\b${escapedName}\\b`, 'g');
+        const regex = createGameNameRegex(game.name);
 
         const walker = document.createTreeWalker(
           document.body,
@@ -575,10 +629,20 @@ async function runExtension() {
 
   try {
     const domain = window.location.hostname;
+
+    // Load case-insensitive setting for this domain
+    const result = await chrome.storage.local.get([CASE_INSENSITIVE_DOMAINS_KEY]);
+    const caseInsensitiveDomains: string[] = result[CASE_INSENSITIVE_DOMAINS_KEY] || [];
+    useCaseInsensitive = caseInsensitiveDomains.includes(domain);
+    console.log('Content: Loaded case-insensitive setting for', domain, ':', useCaseInsensitive);
+
     const response = await chrome.runtime.sendMessage({ action: 'checkDomain', domain });
     if (response && response.enabled) {
       console.log('Content: Auto-running extension for domain:', domain);
+      await notifyWorkingState(true);
       await runExtension();
+      statsShown = true;
+      await notifyWorkingState(false);
     }
   } catch (error) {
     // Silently ignore connection errors during auto-run check
@@ -591,10 +655,13 @@ async function runExtension() {
   }
 })();
 
-chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-  if (request.action === 'removeBadges') {
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'checkStatsShown') {
+    sendResponse({ shown: statsShown });
+  } else if (request.action === 'removeBadges') {
     console.log('Content script received removeBadges.');
 
+    // Disconnect and clean up mutation observer
     if (mutationObserver) {
       mutationObserver.disconnect();
       mutationObserver = null;
@@ -605,13 +672,21 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
       mutationTimeout = null;
     }
 
+    // Clear state
     gameNameMap = null;
     pendingElements = [];
+    isProcessing = false;
 
+    // Remove all badges and wrappers
     const badges = document.querySelectorAll('[data-bgg-rating-badge]');
     const wrappers = document.querySelectorAll('[data-bgg-wrapper]');
 
     wrappers.forEach(wrapper => {
+      // Get the text content (excluding badge) and replace wrapper with text node
+      const badge = wrapper.querySelector('[data-bgg-rating-badge]');
+      if (badge) {
+        badge.remove();
+      }
       const textContent = wrapper.textContent || '';
       const textNode = document.createTextNode(textContent);
       wrapper.parentNode?.replaceChild(textNode, wrapper);
@@ -620,8 +695,25 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
     badges.forEach(badge => badge.remove());
 
     console.log(`Content: Removed ${wrappers.length} wrappers and ${badges.length} badges`);
-  } else if (request.action === 'displayMessage') {
-    await runExtension();
-  }
-});
 
+    // Update state
+    statsShown = false;
+
+    sendResponse({ success: true });
+  } else if (request.action === 'displayMessage') {
+    (async () => {
+      await notifyWorkingState(true);
+      await runExtension();
+      statsShown = true;
+      await notifyWorkingState(false);
+      sendResponse({ success: true });
+    })();
+    return true; // Keep message channel open for async response
+  } else if (request.action === 'updateCaseInsensitive') {
+    useCaseInsensitive = request.value;
+    console.log('Content: Updated case-insensitive setting to:', useCaseInsensitive);
+    sendResponse({ success: true });
+  }
+
+  return true; // Keep message channel open for async responses
+});
