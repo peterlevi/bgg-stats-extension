@@ -1,4 +1,4 @@
-import { BlobReader, BlobWriter, TextReader, TextWriter, ZipReader, ZipWriter } from "@zip.js/zip.js";
+import {BlobReader, BlobWriter, TextReader, TextWriter, ZipReader, ZipWriter} from "@zip.js/zip.js";
 import Papa from "papaparse";
 
 const CACHE_KEY = "bggGameData";
@@ -225,11 +225,7 @@ async function fetchAndParseBggData(): Promise<CompactGameData[]> {
     });
 
     console.log(`Background: BGG data parsed successfully. ${parsedData.length} games found.`);
-
-    // Compact the data to reduce storage size
-    const compactData = compactGameData(parsedData);
-
-    return compactData;
+    return compactGameData(parsedData);
   } catch (error) {
     console.error("Background: Error fetching or parsing BGG data:", error);
     throw error;
