@@ -4,8 +4,9 @@ import Papa from "papaparse";
 const CACHE_KEY = "bggGameData";
 const LAST_FETCH_TIMESTAMP_KEY = "lastBggFetchTimestamp";
 const CACHE_VERSION_KEY = "bggCacheVersion";
-const CURRENT_CACHE_VERSION = 2; // Increment this when changing data structure or filtering logic
+const CURRENT_CACHE_VERSION = 3; // Increment this when changing data structure or filtering logic
 const ONE_WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
+const MIN_VOTES_THRESHOLD = 50; // Minimum number of user ratings required to include a game
 const BGG_DATA_PAGE_URL = "https://boardgamegeek.com/data_dumps/bg_ranks";
 
 function decodeHtmlEntities(text: string): string {
@@ -38,6 +39,7 @@ interface GameData {
 
 // Compact version with only essential fields
 interface CompactGameData {
+  id: string;
   name: string;
   rank: string;
   average: string;
@@ -48,21 +50,22 @@ function compactGameData(games: GameData[]): CompactGameData[] {
   console.log(`Background: Compacting ${games.length} games...`);
   const filtered = games
     .filter(game => {
-      // Include both games and expansions, but only if they have a valid rank and at least 100 votes
+      // Include both games and expansions, but only if they have a valid rank and at least MIN_VOTES_THRESHOLD votes
       const usersRated = parseInt(game.usersrated, 10);
       return game.rank &&
              game.rank !== 'Not Ranked' &&
              game.rank.trim() !== '' &&
              !isNaN(usersRated) &&
-             usersRated >= 100;
+             usersRated >= MIN_VOTES_THRESHOLD;
     })
     .map(game => ({
+      id: game.id,
       name: game.name,
       rank: game.rank,
       average: game.average,
       yearpublished: game.yearpublished,
     }));
-  console.log(`Background: Reduced to ${filtered.length} games with 100+ votes (including expansions)`);
+  console.log(`Background: Reduced to ${filtered.length} games with ${MIN_VOTES_THRESHOLD}+ votes (including expansions)`);
   return filtered;
 }
 

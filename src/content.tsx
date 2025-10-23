@@ -1,10 +1,42 @@
 interface GameData {
+  id: string;
   name: string;
   rank: string;
   average: string;
   yearpublished: string;
 }
 
+interface BggApiGameDetail {
+  id: string;
+  name: string;
+  yearpublished: string;
+  image: string;
+  thumbnail: string;
+  averageRating: string;
+  rank: string;
+  weight: string;
+  minplaytime: string;
+  maxplaytime: string;
+  minplayers: string;
+  maxplayers: string;
+  numRatings: string;
+  playerCountData: {
+    [playerCount: string]: {
+      best: number;
+      recommended: number;
+      notRecommended: number;
+      total: number;
+    };
+  };
+}
+
+// Cache for BGG API responses to avoid repeated requests
+const bggApiCache: Map<string, BggApiGameDetail> = new Map();
+
+// Global tooltip element
+let tooltipElement: HTMLElement | null = null;
+let currentTooltipTarget: HTMLElement | null = null;
+let tooltipTimeout: number | null = null;
 
 console.log('Content script STARTING.');
 
@@ -96,6 +128,320 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         if (ratingNum < 8) return '#1978b3';
         if (ratingNum < 9) return '#1d804c';
         return '#186b40';
+      }
+
+      // Helper function to fetch game details from BGG API
+      async function fetchBggGameDetails(gameId: string): Promise<BggApiGameDetail | null> {
+        // Check cache first
+        if (bggApiCache.has(gameId)) {
+          return bggApiCache.get(gameId)!;
+        }
+
+        try {
+          // Fetch detailed game info including stats using the game ID directly
+          const detailUrl = `https://boardgamegeek.com/xmlapi2/thing?id=${gameId}&stats=1`;
+          const detailResponse = await fetch(detailUrl);
+          const detailXml = await detailResponse.text();
+          const searchParser = new DOMParser();
+          const detailDoc = searchParser.parseFromString(detailXml, 'text/xml');
+
+          const item = detailDoc.querySelector('item');
+          if (!item) {
+            console.warn(`BGG API: No details found for game ID ${gameId}`);
+            return null;
+          }
+
+          // Extract game data
+          const primaryName = item.querySelector('name[type="primary"]')?.getAttribute('value') || '';
+          const yearPublished = item.querySelector('yearpublished')?.getAttribute('value') || '';
+          const image = item.querySelector('image')?.textContent || '';
+          const thumbnail = item.querySelector('thumbnail')?.textContent || '';
+          const avgRating = item.querySelector('average')?.getAttribute('value') || '0';
+          const rankElement = item.querySelector('rank[name="boardgame"]');
+          const rank = rankElement?.getAttribute('value') || 'N/A';
+          const weight = item.querySelector('averageweight')?.getAttribute('value') || '0';
+          const minplaytime = item.querySelector('minplaytime')?.getAttribute('value') || '0';
+          const maxplaytime = item.querySelector('maxplaytime')?.getAttribute('value') || '0';
+          const minplayers = item.querySelector('minplayers')?.getAttribute('value') || '1';
+          const maxplayers = item.querySelector('maxplayers')?.getAttribute('value') || '1';
+          const numRatings = item.querySelector('usersrated')?.getAttribute('value') || '0';
+
+          // Extract player count poll data
+          const playerCountData: BggApiGameDetail['playerCountData'] = {};
+          const suggestedPlayersPoll = Array.from(item.querySelectorAll('poll[name="suggested_numplayers"] results'));
+
+          suggestedPlayersPoll.forEach(results => {
+            const numPlayers = results.getAttribute('numplayers') || '';
+            const best = parseInt(results.querySelector('result[value="Best"]')?.getAttribute('numvotes') || '0');
+            const recommended = parseInt(results.querySelector('result[value="Recommended"]')?.getAttribute('numvotes') || '0');
+            const notRecommended = parseInt(results.querySelector('result[value="Not Recommended"]')?.getAttribute('numvotes') || '0');
+            const total = best + recommended + notRecommended;
+
+            if (total > 0) {
+              playerCountData[numPlayers] = { best, recommended, notRecommended, total };
+            }
+          });
+
+          const gameDetail: BggApiGameDetail = {
+            id: gameId,
+            name: primaryName,
+            yearpublished: yearPublished,
+            image,
+            thumbnail,
+            averageRating: avgRating,
+            rank,
+            weight,
+            minplaytime,
+            maxplaytime,
+            minplayers,
+            maxplayers,
+            numRatings,
+            playerCountData
+          };
+
+          // Cache the result
+          bggApiCache.set(gameId, gameDetail);
+          return gameDetail;
+        } catch (error) {
+          console.error(`BGG API: Error fetching details for game ID ${gameId}:`, error);
+          return null;
+        }
+      }
+
+      // Helper function to create and show tooltip
+      function createTooltip(wrapper: HTMLElement, gameId: string): void {
+        // Remove existing tooltip if any
+        if (tooltipElement) {
+          tooltipElement.remove();
+          tooltipElement = null;
+        }
+
+        // Create tooltip container
+        const tooltip = document.createElement('div');
+        tooltip.style.cssText = `
+          position: absolute;
+          background: white;
+          border: 2px solid #ccc;
+          border-radius: 8px;
+          padding: 12px;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+          z-index: 100000;
+          min-width: 250px;
+          max-width: 350px;
+          font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          font-size: 13px;
+          line-height: 1.4;
+          color: #333;
+          pointer-events: auto;
+        `;
+        tooltip.setAttribute('data-bgg-tooltip', 'true');
+
+        // Show loading state
+        tooltip.innerHTML = `
+          <div style="text-align: center; padding: 20px;">
+            <div style="font-weight: bold; margin-bottom: 8px;">Loading...</div>
+            <div style="color: #666;">Fetching BGG data</div>
+          </div>
+        `;
+
+        // Position tooltip above the wrapper
+        document.body.appendChild(tooltip);
+        const rect = wrapper.getBoundingClientRect();
+        tooltip.style.left = `${rect.left + window.scrollX}px`;
+        tooltip.style.top = `${rect.top + window.scrollY - tooltip.offsetHeight - 10}px`;
+
+        // Adjust if tooltip goes off-screen
+        if (tooltip.offsetLeft + tooltip.offsetWidth > window.innerWidth) {
+          tooltip.style.left = `${window.innerWidth - tooltip.offsetWidth - 10}px`;
+        }
+        if (tooltip.offsetLeft < 0) {
+          tooltip.style.left = '10px';
+        }
+        if (tooltip.offsetTop < window.scrollY) {
+          tooltip.style.top = `${rect.bottom + window.scrollY + 10}px`;
+        }
+
+        tooltipElement = tooltip;
+        currentTooltipTarget = wrapper;
+
+        // Fetch and display game details
+        fetchBggGameDetails(gameId).then(details => {
+          if (!tooltipElement || tooltipElement !== tooltip) return; // Tooltip was removed
+
+          if (!details) {
+            tooltip.innerHTML = `
+              <div style="text-align: center; padding: 20px; color: #666;">
+                Failed to load game details
+              </div>
+            `;
+            return;
+          }
+
+          // Build the tooltip content
+          const ratingColor = getRatingColor(details.averageRating);
+          const ratingNum = parseFloat(details.averageRating);
+          const displayRating = isNaN(ratingNum) ? '0.0' : ratingNum.toFixed(1);
+          const weightNum = parseFloat(details.weight);
+          const displayWeight = isNaN(weightNum) ? '0.00' : weightNum.toFixed(2);
+          const bggUrl = `https://boardgamegeek.com/boardgame/${details.id}`;
+          const numRatingsFormatted = parseInt(details.numRatings).toLocaleString();
+
+          let durationText = '';
+          if (details.minplaytime === details.maxplaytime) {
+            durationText = `${details.minplaytime} min`;
+          } else {
+            durationText = `${details.minplaytime}-${details.maxplaytime} min`;
+          }
+
+          // Create player count heatmap
+          let playerCountHtml = '';
+          const playerCounts = Object.keys(details.playerCountData).sort((a, b) => {
+            const aNum = a.includes('+') ? parseInt(a) + 100 : parseInt(a);
+            const bNum = b.includes('+') ? parseInt(b) + 100 : parseInt(b);
+            return aNum - bNum;
+          });
+
+          if (playerCounts.length > 0) {
+            const playerCountItems = playerCounts.map(count => {
+              const data = details.playerCountData[count];
+              const bestPercent = (data.best / data.total) * 100;
+              const recommendedPercent = (data.recommended / data.total) * 100;
+
+              let bgColor = '#d3d3d3'; // gray (not recommended)
+              if (bestPercent >= 50) {
+                bgColor = '#186b40'; // dark green (best)
+              } else if (bestPercent + recommendedPercent >= 50) {
+                bgColor = '#90EE90'; // light green (recommended)
+              }
+
+              return `
+                <span style="
+                  display: inline-block;
+                  background-color: ${bgColor};
+                  color: ${bgColor === '#90EE90' ? '#000' : '#fff'};
+                  padding: 4px 8px;
+                  margin: 2px;
+                  border-radius: 4px;
+                  font-weight: bold;
+                  cursor: pointer;
+                  font-size: 12px;
+                " data-player-count="${count}" data-best="${data.best}" data-recommended="${data.recommended}" data-not-recommended="${data.notRecommended}" data-total="${data.total}">
+                  ${count}
+                </span>
+              `;
+            }).join('');
+
+            playerCountHtml = `
+              <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd;">
+                <div style="font-weight: bold; margin-bottom: 6px; font-size: 12px; color: #666;">Player Count:</div>
+                <div id="player-count-summary" style="line-height: 2;">
+                  ${playerCountItems}
+                </div>
+                <div id="player-count-details" style="display: none; margin-top: 8px; font-size: 11px; background: #f5f5f5; padding: 8px; border-radius: 4px;">
+                </div>
+              </div>
+            `;
+          }
+
+          tooltip.innerHTML = `
+            <a href="${bggUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration: none; color: inherit;">
+              <div style="font-weight: bold; font-size: 15px; margin-bottom: 8px; color: #111; cursor: pointer;">
+                ${details.name} (${details.yearpublished})
+              </div>
+            </a>
+            ${details.thumbnail ? `
+              <a href="${bggUrl}" target="_blank" rel="noopener noreferrer" style="display: block; text-align: center; margin-bottom: 10px;">
+                <img src="${details.thumbnail}" alt="${details.name}" style="max-width: 100%; border-radius: 4px; cursor: pointer;" />
+              </a>
+            ` : ''}
+            <div style="display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; font-size: 13px;">
+              <div style="font-weight: bold;">Rating:</div>
+              <div>
+                <span style="
+                  background-color: ${ratingColor};
+                  color: white;
+                  padding: 2px 6px;
+                  border-radius: 4px;
+                  font-weight: bold;
+                  margin-right: 4px;
+                ">${displayRating}</span>
+                <span style="color: #666;">from ${numRatingsFormatted} ratings</span>
+              </div>
+              <div style="font-weight: bold;">Rank:</div>
+              <div>${details.rank === 'Not Ranked' ? 'Unranked' : '#' + details.rank}</div>
+              <div style="font-weight: bold;">Weight:</div>
+              <div>${displayWeight} / 5.00</div>
+              <div style="font-weight: bold;">Duration:</div>
+              <div>${durationText}</div>
+            </div>
+            ${playerCountHtml}
+          `;
+
+          // Reposition after content is loaded
+          tooltip.style.left = `${rect.left + window.scrollX}px`;
+          tooltip.style.top = `${rect.top + window.scrollY - tooltip.offsetHeight - 10}px`;
+
+          if (tooltip.offsetLeft + tooltip.offsetWidth > window.innerWidth) {
+            tooltip.style.left = `${window.innerWidth - tooltip.offsetWidth - 10}px`;
+          }
+          if (tooltip.offsetLeft < 0) {
+            tooltip.style.left = '10px';
+          }
+          if (tooltip.offsetTop < window.scrollY) {
+            tooltip.style.top = `${rect.bottom + window.scrollY + 10}px`;
+          }
+
+          // Add click handlers for player count expansion
+          const playerCountSummary = tooltip.querySelector('#player-count-summary');
+          const playerCountDetails = tooltip.querySelector('#player-count-details') as HTMLElement;
+
+          if (playerCountSummary && playerCountDetails) {
+            playerCountSummary.addEventListener('click', (e) => {
+              const target = e.target as HTMLElement;
+              if (target.hasAttribute('data-player-count')) {
+                const count = target.getAttribute('data-player-count')!;
+                const best = target.getAttribute('data-best')!;
+                const recommended = target.getAttribute('data-recommended')!;
+                const notRecommended = target.getAttribute('data-not-recommended')!;
+                const total = target.getAttribute('data-total')!;
+
+                const bestPercent = ((parseInt(best) / parseInt(total)) * 100).toFixed(1);
+                const recommendedPercent = ((parseInt(recommended) / parseInt(total)) * 100).toFixed(1);
+                const notRecommendedPercent = ((parseInt(notRecommended) / parseInt(total)) * 100).toFixed(1);
+
+                playerCountDetails.innerHTML = `
+                  <div style="font-weight: bold; margin-bottom: 6px;">${count} Players:</div>
+                  <div style="margin-bottom: 4px;">
+                    <span style="color: #186b40; font-weight: bold;">Best:</span> ${best} (${bestPercent}%)
+                  </div>
+                  <div style="margin-bottom: 4px;">
+                    <span style="color: #5cb85c; font-weight: bold;">Recommended:</span> ${recommended} (${recommendedPercent}%)
+                  </div>
+                  <div style="margin-bottom: 4px;">
+                    <span style="color: #666; font-weight: bold;">Not Recommended:</span> ${notRecommended} (${notRecommendedPercent}%)
+                  </div>
+                  <div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid #ddd; color: #666;">
+                    Total votes: ${total}
+                  </div>
+                `;
+                playerCountDetails.style.display = 'block';
+              }
+            });
+          }
+        });
+      }
+
+      // Helper function to hide tooltip
+      function hideTooltip(): void {
+        if (tooltipTimeout) {
+          clearTimeout(tooltipTimeout);
+          tooltipTimeout = null;
+        }
+        if (tooltipElement) {
+          tooltipElement.remove();
+          tooltipElement = null;
+        }
+        currentTooltipTarget = null;
       }
 
       // Helper function to create hexagon badge
@@ -234,6 +580,36 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
               `;
               wrapper.appendChild(badge);
               wrapper.appendChild(matchNode);
+
+              // Add hover event listeners for tooltip
+              wrapper.addEventListener('mouseenter', () => {
+                if (tooltipTimeout) {
+                  clearTimeout(tooltipTimeout);
+                  tooltipTimeout = null;
+                }
+                createTooltip(wrapper, game.id);
+              });
+
+              wrapper.addEventListener('mouseleave', () => {
+                tooltipTimeout = window.setTimeout(() => {
+                  hideTooltip();
+                }, 300); // Small delay before hiding
+              });
+
+              // Keep tooltip visible when hovering over it
+              wrapper.addEventListener('mouseenter', () => {
+                if (tooltipElement) {
+                  tooltipElement.addEventListener('mouseenter', () => {
+                    if (tooltipTimeout) {
+                      clearTimeout(tooltipTimeout);
+                      tooltipTimeout = null;
+                    }
+                  });
+                  tooltipElement.addEventListener('mouseleave', () => {
+                    hideTooltip();
+                  });
+                }
+              });
 
               // Replace the original node
               const fragment = document.createDocumentFragment();
