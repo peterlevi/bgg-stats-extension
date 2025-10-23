@@ -4,6 +4,7 @@ import Papa from "papaparse";
 const CACHE_KEY = "bggGameData";
 const LAST_FETCH_TIMESTAMP_KEY = "lastBggFetchTimestamp";
 const CACHE_VERSION_KEY = "bggCacheVersion";
+const ENABLED_DOMAINS_KEY = "bggEnabledDomains";
 const CURRENT_CACHE_VERSION = 3; // Increment this when changing data structure or filtering logic
 const ONE_WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_VOTES_THRESHOLD = 100; // Minimum number of user ratings required to include a game
@@ -234,15 +235,83 @@ async function fetchAndParseBggData(): Promise<CompactGameData[]> {
 
 console.log('Background script STARTING.');
 
-chrome.action.onClicked.addListener((tab) => {
-  if (tab.id) {
-    chrome.tabs.sendMessage(tab.id, { action: "displayMessage" });
+// Update icon based on domain status
+async function updateIcon(tabId: number, url: string) {
+  try {
+    const domain = new URL(url).hostname;
+    const result = await chrome.storage.local.get([ENABLED_DOMAINS_KEY]);
+    const enabledDomains: string[] = result[ENABLED_DOMAINS_KEY] || [];
+    
+    const isEnabled = enabledDomains.includes(domain);
+    
+    await chrome.action.setIcon({
+      tabId: tabId,
+      path: {
+        "16": isEnabled ? "icon16_active.png" : "icon16.png",
+        "48": isEnabled ? "icon48_active.png" : "icon48.png",
+        "128": isEnabled ? "icon128_active.png" : "icon128.png"
+      }
+    });
+  } catch (error) {
+    console.error("Background: Error updating icon:", error);
+  }
+}
+
+// Listen for tab updates to update icon
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && tab.url) {
+    updateIcon(tabId, tab.url);
+  }
+});
+
+// Listen for tab activation to update icon
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  const tab = await chrome.tabs.get(activeInfo.tabId);
+  if (tab.url) {
+    updateIcon(activeInfo.tabId, tab.url);
+  }
+});
+
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (tab.id && tab.url) {
+    try {
+      const domain = new URL(tab.url).hostname;
+      const result = await chrome.storage.local.get([ENABLED_DOMAINS_KEY]);
+      const enabledDomains: string[] = result[ENABLED_DOMAINS_KEY] || [];
+      
+      const isEnabled = enabledDomains.includes(domain);
+      
+      if (isEnabled) {
+        // Remove domain and clear badges
+        const updatedDomains = enabledDomains.filter(d => d !== domain);
+        await chrome.storage.local.set({ [ENABLED_DOMAINS_KEY]: updatedDomains });
+        await updateIcon(tab.id, tab.url);
+        chrome.tabs.sendMessage(tab.id, { action: "removeBadges" });
+      } else {
+        // Add domain and display badges
+        enabledDomains.push(domain);
+        await chrome.storage.local.set({ [ENABLED_DOMAINS_KEY]: enabledDomains });
+        await updateIcon(tab.id, tab.url);
+        chrome.tabs.sendMessage(tab.id, { action: "displayMessage" });
+      }
+    } catch (error) {
+      console.error("Background: Error in action.onClicked:", error);
+    }
   }
 });
 
 // Listener for content.tsx to request data or trigger fetch
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === "getBggData") {
+  if (request.action === "checkDomain") {
+    console.log("Background: Received checkDomain request.");
+    const domain = request.domain;
+    chrome.storage.local.get([ENABLED_DOMAINS_KEY]).then((result) => {
+      const enabledDomains: string[] = result[ENABLED_DOMAINS_KEY] || [];
+      sendResponse({ enabled: enabledDomains.includes(domain) });
+    });
+    return true;
+  } else if (request.action === "getBggData") {
     console.log("Background: Received getBggData request.");
     getCachedBggData().then(({ data, isOld }) => {
       sendResponse({ bggData: data, isOld: isOld });
