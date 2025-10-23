@@ -1,5 +1,5 @@
 import { getRatingColor } from './utils';
-import {wireTooltip} from "./tooltip";
+import { wireTooltip } from './tooltip';
 
 interface GameData {
   id: string;
@@ -8,8 +8,6 @@ interface GameData {
   average: string;
   yearpublished: string;
 }
-
-console.log('Content script STARTING.');
 
 chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
   if (request.action === 'displayMessage') {
@@ -151,7 +149,7 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
       currentBggData.forEach((game) => {
         try {
           // Skip games with names that are just 2 or 3 digits (likely false positives)
-          if (/^\d{2,3}$/.test(game.name)) {
+          if (/^\d{1,3}$/.test(game.name)) {
             return;
           }
 
@@ -313,5 +311,3 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
     }
   }
 });
-
-console.log('Content script FINISHED initialization.');
