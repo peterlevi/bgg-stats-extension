@@ -3,6 +3,8 @@ import Papa from "papaparse";
 
 const CACHE_KEY = "bggGameData";
 const LAST_FETCH_TIMESTAMP_KEY = "lastBggFetchTimestamp";
+const CACHE_VERSION_KEY = "bggCacheVersion";
+const CURRENT_CACHE_VERSION = 2; // Increment this when changing data structure or filtering logic
 const ONE_WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
 const BGG_DATA_PAGE_URL = "https://boardgamegeek.com/data_dumps/bg_ranks";
 
@@ -46,8 +48,13 @@ function compactGameData(games: GameData[]): CompactGameData[] {
   console.log(`Background: Compacting ${games.length} games...`);
   const filtered = games
     .filter(game => {
-      // Only include games (not expansions) that have a valid rank
-      return game.is_expansion !== '1' && game.rank && game.rank !== 'Not Ranked' && game.rank.trim() !== '';
+      // Include both games and expansions, but only if they have a valid rank and at least 100 votes
+      const usersRated = parseInt(game.usersrated, 10);
+      return game.rank &&
+             game.rank !== 'Not Ranked' &&
+             game.rank.trim() !== '' &&
+             !isNaN(usersRated) &&
+             usersRated >= 100;
     })
     .map(game => ({
       name: game.name,
@@ -55,7 +62,7 @@ function compactGameData(games: GameData[]): CompactGameData[] {
       average: game.average,
       yearpublished: game.yearpublished,
     }));
-  console.log(`Background: Reduced to ${filtered.length} ranked games (excluding expansions)`);
+  console.log(`Background: Reduced to ${filtered.length} games with 100+ votes (including expansions)`);
   return filtered;
 }
 
@@ -127,14 +134,18 @@ async function decompressDataFromCsv(base64Zip: string): Promise<CompactGameData
 }
 
 async function getCachedBggData(): Promise<{ data: CompactGameData[] | null; isOld: boolean }> {
-  const result = await chrome.storage.local.get([CACHE_KEY, LAST_FETCH_TIMESTAMP_KEY]);
+  const result = await chrome.storage.local.get([CACHE_KEY, LAST_FETCH_TIMESTAMP_KEY, CACHE_VERSION_KEY]);
   const cachedZip = result[CACHE_KEY] || null;
   const lastFetchTimestamp = result[LAST_FETCH_TIMESTAMP_KEY];
+  const cachedVersion = result[CACHE_VERSION_KEY] || 0;
 
-  const isOld = !lastFetchTimestamp || (Date.now() - lastFetchTimestamp > ONE_WEEK_IN_MS);
+  // Check if cache is old or version is outdated
+  const isOld = !lastFetchTimestamp ||
+                (Date.now() - lastFetchTimestamp > ONE_WEEK_IN_MS) ||
+                cachedVersion < CURRENT_CACHE_VERSION;
 
   let cachedData: CompactGameData[] | null = null;
-  if (cachedZip) {
+  if (cachedZip && cachedVersion === CURRENT_CACHE_VERSION) {
     try {
       cachedData = await decompressDataFromCsv(cachedZip);
     } catch (error) {
@@ -143,7 +154,7 @@ async function getCachedBggData(): Promise<{ data: CompactGameData[] | null; isO
     }
   }
 
-  console.log(`Background: getCachedBggData - found ${cachedData ? cachedData.length : 0} games, isOld: ${isOld}`);
+  console.log(`Background: getCachedBggData - found ${cachedData ? cachedData.length : 0} games, isOld: ${isOld}, version: ${cachedVersion}/${CURRENT_CACHE_VERSION}`);
 
   return { data: cachedData, isOld };
 }
@@ -257,12 +268,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Compress the data to CSV and zip it
         const compressedData = await compressDataToCsv(newData);
 
-        // Save the compressed data to storage
+        // Save the compressed data to storage with version
         return chrome.storage.local.set({
           [CACHE_KEY]: compressedData,
           [LAST_FETCH_TIMESTAMP_KEY]: Date.now(),
+          [CACHE_VERSION_KEY]: CURRENT_CACHE_VERSION,
         }).then(() => {
-          console.log(`Background: Compressed data saved successfully, sending response with ${newData.length} games`);
+          console.log(`Background: Compressed data saved successfully (v${CURRENT_CACHE_VERSION}), sending response with ${newData.length} games`);
           sendResponse({ success: true, bggData: newData });
         });
       })

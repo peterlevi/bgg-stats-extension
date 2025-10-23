@@ -13,7 +13,18 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
     console.log('Content script received displayMessage.');
     const messageDiv = document.createElement('div');
     messageDiv.textContent = "Working...";
-    messageDiv.style.cssText = 'position: fixed; top: 0; left: 0; background-color: lightblue; z-index: 99999; padding: 5px;';
+    messageDiv.style.cssText = `
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background-color: lightblue;
+      z-index: 99999;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    `;
     document.body.prepend(messageDiv);
 
     try {
@@ -93,50 +104,26 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         const displayRating = isNaN(ratingNum) ? '0.0' : ratingNum.toFixed(1);
         const color = getRatingColor(rating);
 
-        // Create a container for the hexagon (perfectly square for regular hexagon)
-        const container = document.createElement('span');
-        container.style.cssText = `
-          display: inline-block;
-          position: relative;
-          margin-right: 0.4em;
-          margin-left: 0.1em;
-          vertical-align: middle;
-          width: 2.16em;
-          height: 2.16em;
-          line-height: 1;
+        // Create a simple span badge with BGG color
+        const badge = document.createElement('span');
+        badge.style.cssText = `
+          display: inline;
+          background-color: ${color};
+          color: white;
+          font-weight: bold;
+          padding: 1px 4px;
+          margin-right: 4px;
+          border-radius: 4px;
+          font-size: inherit;
+          line-height: inherit;
+          vertical-align: baseline;
+          white-space: nowrap;
         `;
-        container.setAttribute('data-bgg-rating-badge', 'true');
-        container.title = `BGG Rating: ${displayRating} | Rank: ${rank} | Year: ${year}`;
+        badge.setAttribute('data-bgg-rating-badge', 'true');
+        badge.title = `BGG Rating: ${displayRating} | Rank: ${rank} | Year: ${year}`;
+        badge.textContent = displayRating;
 
-        // Create SVG hexagon with square viewBox for perfect regular hexagon
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('viewBox', '0 0 100 100');
-        svg.setAttribute('width', '100%');
-        svg.setAttribute('height', '100%');
-        svg.style.cssText = 'display: block;';
-
-        // Create hexagon path (regular hexagon centered in square)
-        const hexagon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        hexagon.setAttribute('points', '50,5 90,30 90,70 50,95 10,70 10,30');
-        hexagon.setAttribute('fill', color);
-
-        // Create text element for rating (adjusted y position for better vertical centering)
-        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        text.setAttribute('x', '50');
-        text.setAttribute('y', '54');
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('dominant-baseline', 'middle');
-        text.setAttribute('fill', 'white');
-        text.setAttribute('font-weight', 'bold');
-        text.setAttribute('font-size', '38');
-        text.setAttribute('font-family', 'Arial, sans-serif');
-        text.textContent = displayRating;
-
-        svg.appendChild(hexagon);
-        svg.appendChild(text);
-        container.appendChild(svg);
-
-        return container;
+        return badge;
       }
 
       currentBggData.forEach(game => {
@@ -147,7 +134,7 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
           }
 
           const escapedName = escapeRegex(game.name);
-          const regex = new RegExp(`\\b${escapedName}\\b`, 'gi');
+          const regex = new RegExp(`\\b${escapedName}\\b`, 'g'); // Case-sensitive matching
           if (regex.test(pageText)) {
             foundGames.push(game);
           }
@@ -167,10 +154,15 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         // Add rating badges to the page
         messageDiv.textContent = "Adding rating badges...";
 
-        foundGames.forEach(game => {
+        // Sort games by name length (longest first) to match longer titles before shorter ones
+        // This prevents substring matches and ensures expansions are matched before base games
+        const sortedGames = [...foundGames].sort((a, b) => b.name.length - a.name.length);
+        console.log(`Content: Processing ${sortedGames.length} games in order of title length (longest first)`);
+
+        sortedGames.forEach(game => {
           try {
             const escapedName = escapeRegex(game.name);
-            const regex = new RegExp(`\\b${escapedName}\\b`, 'gi');
+            const regex = new RegExp(`\\b${escapedName}\\b`, 'g'); // Case-sensitive matching
 
             // Find all text nodes in the document
             const walker = document.createTreeWalker(
@@ -183,8 +175,8 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
                   if (!parent || parent.closest('script, style, noscript') || parent === messageDiv || messageDiv.contains(parent)) {
                     return NodeFilter.FILTER_REJECT;
                   }
-                  // Skip if already has a badge
-                  if (parent.querySelector('[data-bgg-rating-badge]')) {
+                  // Skip if already has a badge or is inside a wrapper with a badge
+                  if (parent.querySelector('[data-bgg-rating-badge]') || parent.closest('[data-bgg-wrapper]')) {
                     return NodeFilter.FILTER_REJECT;
                   }
                   return regex.test(node.textContent || '') ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
@@ -208,6 +200,11 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
               const parent = node.parentElement;
               if (!parent) return;
 
+              // Double-check this node hasn't been processed (in case of multiple games with overlapping names)
+              if (parent.querySelector('[data-bgg-rating-badge]') || parent.closest('[data-bgg-wrapper]')) {
+                return;
+              }
+
               const text = node.textContent || '';
               const match = regex.exec(text);
               if (!match) return;
@@ -227,11 +224,13 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
 
               // Wrap badge and game name in a container with light blue background
               const wrapper = document.createElement('span');
+              wrapper.setAttribute('data-bgg-wrapper', 'true');
               wrapper.style.cssText = `
                 background-color: #e6f2ff;
-                padding: 2px 4px;
-                border-radius: 3px;
-                display: inline-block;
+                padding: 1px 3px;
+                border-radius: 2px;
+                display: inline;
+                line-height: inherit;
               `;
               wrapper.appendChild(badge);
               wrapper.appendChild(matchNode);
