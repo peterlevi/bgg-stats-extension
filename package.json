@@ -12,14 +12,10 @@
   "license": "ISC",
   "dependencies": {
     "@zip.js/zip.js": "^2.1.4",
-    "papaparse": "^5.4.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "papaparse": "^5.4.1"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",
-    "@types/react": "^18.2.79",
-    "@types/react-dom": "^18.2.25",
     "copy-webpack-plugin": "^12.0.2",
     "ts-loader": "^9.5.1",
     "typescript": "^5.4.5",
