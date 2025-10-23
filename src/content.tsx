@@ -308,20 +308,20 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
               const recommendedPercent = (data.recommended / data.total) * 100;
 
               let bgColor = '#d3d3d3'; // gray (not recommended)
-              if (bestPercent >= 50) {
+              if (bestPercent >= 45) {
                 bgColor = '#186b40'; // dark green (best)
-              } else if (bestPercent + recommendedPercent >= 50) {
+              } else if (bestPercent + recommendedPercent >= 70) {
                 bgColor = '#90EE90'; // light green (recommended)
               }
 
               return `
                 <span style="
-                  display: inline-block;
+                  display: inline;
                   background-color: ${bgColor};
                   color: ${bgColor === '#90EE90' ? '#000' : '#fff'};
                   padding: 4px 8px;
-                  margin: 2px;
-                  border-radius: 4px;
+                  margin: 0;
+                  border-radius: 0;
                   font-weight: bold;
                   cursor: pointer;
                   font-size: 12px;
@@ -334,10 +334,10 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
             playerCountHtml = `
               <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd;">
                 <div style="font-weight: bold; margin-bottom: 6px; font-size: 12px; color: #666;">Player Count:</div>
-                <div id="player-count-summary" style="line-height: 2;">
+                <div id="player-count-summary" style="line-height: 1; display: inline-block;">
                   ${playerCountItems}
                 </div>
-                <div id="player-count-details" style="display: none; margin-top: 8px; font-size: 11px; background: #f5f5f5; padding: 8px; border-radius: 4px;">
+                <div id="player-count-details" style="display: none; margin-top: 12px;">
                 </div>
               </div>
             `;
@@ -350,9 +350,11 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
               </div>
             </a>
             ${details.thumbnail ? `
-              <a href="${bggUrl}" target="_blank" rel="noopener noreferrer" style="display: block; text-align: center; margin-bottom: 10px;">
-                <img src="${details.thumbnail}" alt="${details.name}" style="max-width: 100%; border-radius: 4px; cursor: pointer;" />
-              </a>
+              <div style="display: flex; justify-content: center; margin-bottom: 10px;">
+                <a href="${bggUrl}" target="_blank" rel="noopener noreferrer">
+                  <img src="${details.thumbnail}" alt="${details.name}" style="max-width: 100%; border-radius: 4px; cursor: pointer;" />
+                </a>
+              </div>
             ` : ''}
             <div style="display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; font-size: 13px;">
               <div style="font-weight: bold;">Rating:</div>
@@ -396,35 +398,110 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
           const playerCountDetails = tooltip.querySelector('#player-count-details') as HTMLElement;
 
           if (playerCountSummary && playerCountDetails) {
+            let isExpanded = false;
+
             playerCountSummary.addEventListener('click', (e) => {
               const target = e.target as HTMLElement;
               if (target.hasAttribute('data-player-count')) {
-                const count = target.getAttribute('data-player-count')!;
-                const best = target.getAttribute('data-best')!;
-                const recommended = target.getAttribute('data-recommended')!;
-                const notRecommended = target.getAttribute('data-not-recommended')!;
-                const total = target.getAttribute('data-total')!;
+                // Toggle the table display
+                if (isExpanded) {
+                  playerCountDetails.style.display = 'none';
+                  isExpanded = false;
+                } else {
+                  // Helper function to get green color for Best column based on percentage
+                  const getBestColor = (percent: number): string => {
+                    if (percent < 5) return '#f5f5f5'; // very light gray
+                    if (percent < 15) return '#e8f5e9'; // very light green
+                    if (percent < 30) return '#a5d6a7'; // light green
+                    if (percent < 50) return '#66bb6a'; // medium green
+                    if (percent < 75) return '#43a047'; // darker green
+                    return '#2e7d32'; // dark green
+                  };
 
-                const bestPercent = ((parseInt(best) / parseInt(total)) * 100).toFixed(1);
-                const recommendedPercent = ((parseInt(recommended) / parseInt(total)) * 100).toFixed(1);
-                const notRecommendedPercent = ((parseInt(notRecommended) / parseInt(total)) * 100).toFixed(1);
+                  // Helper function to get yellow color for Recommended column based on percentage
+                  const getRecommendedColor = (percent: number): string => {
+                    if (percent < 5) return '#f5f5f5'; // very light gray
+                    if (percent < 15) return '#fff9c4'; // very light yellow
+                    if (percent < 30) return '#fff59d'; // light yellow
+                    if (percent < 50) return '#ffee58'; // medium yellow
+                    if (percent < 75) return '#fdd835'; // darker yellow
+                    return '#f9a825'; // dark yellow/gold
+                  };
 
-                playerCountDetails.innerHTML = `
-                  <div style="font-weight: bold; margin-bottom: 6px;">${count} Players:</div>
-                  <div style="margin-bottom: 4px;">
-                    <span style="color: #186b40; font-weight: bold;">Best:</span> ${best} (${bestPercent}%)
-                  </div>
-                  <div style="margin-bottom: 4px;">
-                    <span style="color: #5cb85c; font-weight: bold;">Recommended:</span> ${recommended} (${recommendedPercent}%)
-                  </div>
-                  <div style="margin-bottom: 4px;">
-                    <span style="color: #666; font-weight: bold;">Not Recommended:</span> ${notRecommended} (${notRecommendedPercent}%)
-                  </div>
-                  <div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid #ddd; color: #666;">
-                    Total votes: ${total}
-                  </div>
-                `;
-                playerCountDetails.style.display = 'block';
+                  // Helper function to get red color for Not Recommended column based on percentage
+                  const getNotRecommendedColor = (percent: number): string => {
+                    if (percent < 5) return '#f5f5f5'; // very light gray
+                    if (percent < 15) return '#ffebee'; // very light red
+                    if (percent < 30) return '#ef9a9a'; // light red
+                    if (percent < 50) return '#e57373'; // medium red
+                    if (percent < 75) return '#e53935'; // darker red
+                    return '#c62828'; // dark red
+                  };
+
+                  // Helper function to get text color based on background
+                  const getTextColor = (bgColor: string): string => {
+                    // Use white text for dark backgrounds
+                    const darkColors = ['#2e7d32', '#43a047', '#f9a825', '#fdd835', '#e53935', '#c62828'];
+                    if (darkColors.includes(bgColor)) {
+                      return '#ffffff';
+                    }
+                    return '#000000';
+                  };
+
+                  // Calculate total votes across all player counts
+                  let totalVotes = 0;
+                  playerCounts.forEach(count => {
+                    const data = details.playerCountData[count];
+                    totalVotes += data.total;
+                  });
+
+                  // Build full table with all player counts
+                  let tableRows = '';
+                  playerCounts.forEach(count => {
+                    const data = details.playerCountData[count];
+                    const bestPercent = (data.best / data.total) * 100;
+                    const recommendedPercent = (data.recommended / data.total) * 100;
+                    const notRecommendedPercent = (data.notRecommended / data.total) * 100;
+
+                    const bestColor = getBestColor(bestPercent);
+                    const recommendedColor = getRecommendedColor(recommendedPercent);
+                    const notRecommendedColor = getNotRecommendedColor(notRecommendedPercent);
+
+                    const bestTextColor = getTextColor(bestColor);
+                    const recommendedTextColor = getTextColor(recommendedColor);
+                    const notRecommendedTextColor = getTextColor(notRecommendedColor);
+
+                    tableRows += `
+                      <tr>
+                        <td style="padding: 6px 10px; border: 1px solid #ddd; font-weight: bold; text-align: center;">${count}</td>
+                        <td style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; background-color: ${bestColor}; color: ${bestTextColor};">${bestPercent.toFixed(0)}%</td>
+                        <td style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; background-color: ${recommendedColor}; color: ${recommendedTextColor};">${recommendedPercent.toFixed(0)}%</td>
+                        <td style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; background-color: ${notRecommendedColor}; color: ${notRecommendedTextColor};">${notRecommendedPercent.toFixed(0)}%</td>
+                      </tr>
+                    `;
+                  });
+
+                  playerCountDetails.innerHTML = `
+                    <div style="font-size: 11px; color: #666; margin-bottom: 6px; text-align: center;">
+                      Total votes: ${totalVotes.toLocaleString()}
+                    </div>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px;">
+                      <thead>
+                        <tr style="background-color: #f0f0f0;">
+                          <th style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">#</th>
+                          <th style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">Best</th>
+                          <th style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">Rec.</th>
+                          <th style="padding: 6px 10px; border: 1px solid #ddd; text-align: center; font-weight: bold;">Not Rec.</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${tableRows}
+                      </tbody>
+                    </table>
+                  `;
+                  playerCountDetails.style.display = 'block';
+                  isExpanded = true;
+                }
               }
             });
           }

@@ -6,7 +6,7 @@ const LAST_FETCH_TIMESTAMP_KEY = "lastBggFetchTimestamp";
 const CACHE_VERSION_KEY = "bggCacheVersion";
 const CURRENT_CACHE_VERSION = 3; // Increment this when changing data structure or filtering logic
 const ONE_WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
-const MIN_VOTES_THRESHOLD = 50; // Minimum number of user ratings required to include a game
+const MIN_VOTES_THRESHOLD = 100; // Minimum number of user ratings required to include a game
 const BGG_DATA_PAGE_URL = "https://boardgamegeek.com/data_dumps/bg_ranks";
 
 function decodeHtmlEntities(text: string): string {
