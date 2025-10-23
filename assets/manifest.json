@@ -3,8 +3,11 @@
   "name": "Hello World Extension",
   "version": "1.0",
   "description": "A simple Chrome extension that adds 'Hello World' to pages.",
-  "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["https://generativelanguage.googleapis.com/"],
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "https://boardgamegeek.com/*",
+    "https://geek-export-stats.s3.amazonaws.com/*"
+  ],
   "action": {
     "default_icon": {
       "16": "icon16.png",
@@ -27,3 +30,4 @@
     "128": "icon128.png"
   }
 }
+
