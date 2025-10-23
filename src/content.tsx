@@ -11,11 +11,9 @@ interface GameData {
 
 // Global state for mutation observer and game data
 let gameNameMap: Map<string, GameData> | null = null;
-let mutationObserver: MutationObserver | null = null;
-let isProcessing = false;
-let isExtensionModifying = false; // New flag to ignore our own modifications
-let mutationTimeout: NodeJS.Timeout | null = null;
-let pendingElements: Element[] = [];
+let urlChangeObserver: MutationObserver | null = null;
+let urlChangeTimeout: NodeJS.Timeout | null = null;
+let currentUrl: string = window.location.href;
 let useCaseInsensitive: boolean = true; // Default to true since we added the 'i' flag
 let statsShown: boolean = false; // Track whether stats are currently shown
 
@@ -225,168 +223,288 @@ async function processElementForGames(
   return badgesAdded;
 }
 
-// Process pending elements after DOM mutations have settled
-async function processPendingElements() {
-  if (isProcessing || pendingElements.length === 0 || !gameNameMap) {
+
+// Process the entire page for game badges
+async function processBadgesForPage(messageDiv?: HTMLElement) {
+  if (!gameNameMap || gameNameMap.size === 0) {
     return;
   }
 
-  isProcessing = true;
-  isExtensionModifying = true; // Set flag before starting modifications
-  const elementsToProcess = [...pendingElements];
-  pendingElements = [];
-
-  // Create or reuse message div
-  let messageDiv = document.querySelector('[data-bgg-message]') as HTMLElement;
-  if (!messageDiv) {
-    messageDiv = document.createElement('div');
-    messageDiv.setAttribute('data-bgg-message', 'true');
-    messageDiv.style.cssText = `
-      position: fixed;
-      top: 10px;
-      right: 10px;
-      background-color: lightblue;
-      z-index: 99999;
-      padding: 8px 12px;
-      border-radius: 4px;
-      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      font-size: 13px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-    `;
-    document.body.prepend(messageDiv);
+  const providedMessageDiv = messageDiv;
+  let msgDiv: HTMLElement;
+  if (!providedMessageDiv) {
+    let div = document.querySelector('[data-bgg-message]') as HTMLElement;
+    if (!div) {
+      div = document.createElement('div');
+      div.setAttribute('data-bgg-message', 'true');
+      div.style.cssText = `
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        background-color: lightblue;
+        z-index: 99999;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-size: 13px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+      `;
+      document.body.prepend(div);
+    }
+    msgDiv = div;
+  } else {
+    msgDiv = providedMessageDiv;
   }
-  messageDiv.style.display = 'block';
-  messageDiv.textContent = `Processing new content...`;
+
+  msgDiv.style.display = 'block';
+  msgDiv.textContent = 'Searching for board games...';
 
   try {
+    // Find games mentioned on the page
+    const pageText = document.body.innerText;
+    const foundGames: GameData[] = [];
+
+    for (const [gameName, gameData] of gameNameMap) {
+      try {
+        const regex = createGameNameRegex(gameName);
+        if (regex.test(pageText)) {
+          foundGames.push(gameData);
+        }
+      } catch (error) {
+        console.warn(`Content: Skipping game "${gameName}" due to regex error:`, error);
+      }
+    }
+
+    console.log(`Content: Found ${foundGames.length} games mentioned on page`);
+
+    if (foundGames.length === 0) {
+      msgDiv.textContent = 'No board games found on this page.';
+      setTimeout(() => {
+        msgDiv.style.display = 'none';
+      }, 2000);
+      return;
+    }
+
+    // Sort games by name length (longest first) to match longer titles before shorter ones
+    const sortedGames = [...foundGames].sort((a, b) => b.name.length - a.name.length);
+    let gamesProcessed = 0;
     let totalBadgesAdded = 0;
 
-    // Don't disconnect observer, just let the flag handle ignoring mutations
-    // This is more efficient than constantly disconnecting/reconnecting
+    // Process games and add badges
+    for (const game of sortedGames) {
+      try {
+        const regex = createGameNameRegex(game.name);
 
-    // Process elements with yielding to keep browser responsive
-    for (let i = 0; i < elementsToProcess.length; i++) {
-      const element = elementsToProcess[i];
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: function (node) {
+              const parent = node.parentElement;
+              if (
+                !parent ||
+                parent.closest('script, style, noscript') ||
+                (msgDiv && (parent === msgDiv || msgDiv.contains(parent)))
+              ) {
+                return NodeFilter.FILTER_REJECT;
+              }
+              if (
+                parent.querySelector('[data-bgg-rating-badge]') ||
+                parent.closest('[data-bgg-wrapper]')
+              ) {
+                return NodeFilter.FILTER_REJECT;
+              }
+              return regex.test(node.textContent || '')
+                ? NodeFilter.FILTER_ACCEPT
+                : NodeFilter.FILTER_REJECT;
+            },
+          }
+        );
 
-      if (!document.body.contains(element)) {
-        continue;
-      }
+        const nodesToProcess: { node: Text }[] = [];
+        let currentNode: Node | null;
 
-      const badgesAdded = await processElementForGames(element);
-      totalBadgesAdded += badgesAdded;
+        while ((currentNode = walker.nextNode())) {
+          const textNode = currentNode as Text;
+          if (textNode.textContent?.match(regex)) {
+            nodesToProcess.push({ node: textNode });
+          }
+        }
 
-      // Yield to browser every element to prevent freezing
-      if (i > 0) {
-        messageDiv.textContent = `Processing new content... (${i + 1}/${elementsToProcess.length})`;
-        await new Promise(resolve => setTimeout(resolve, 0));
+        nodesToProcess.forEach(({ node }) => {
+          const parent = node.parentElement;
+          if (!parent) return;
+
+          if (
+            parent.querySelector('[data-bgg-rating-badge]') ||
+            parent.closest('[data-bgg-wrapper]')
+          ) {
+            return;
+          }
+
+          const text = node.textContent || '';
+          const match = regex.exec(text);
+          if (!match) return;
+
+          const matchIndex = match.index;
+          const matchText = match[0];
+
+          const beforeText = text.substring(0, matchIndex);
+          const afterText = text.substring(matchIndex + matchText.length);
+
+          const beforeNode = document.createTextNode(beforeText);
+          const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
+          const matchNode = document.createTextNode(matchText);
+          const afterNode = document.createTextNode(afterText);
+
+          const wrapper = document.createElement('span');
+          wrapper.setAttribute('data-bgg-wrapper', 'true');
+          wrapper.style.cssText = `
+            background-color: #e6f2ff;
+            padding: 1px 3px;
+            border-radius: 2px;
+            display: inline;
+            line-height: inherit;
+          `;
+          wrapper.appendChild(badge);
+          wrapper.appendChild(matchNode);
+
+          wireTooltip(wrapper, game.id);
+
+          const fragment = document.createDocumentFragment();
+          if (beforeText) fragment.appendChild(beforeNode);
+          fragment.appendChild(wrapper);
+          if (afterText) fragment.appendChild(afterNode);
+
+          parent.replaceChild(fragment, node);
+          totalBadgesAdded++;
+        });
+
+        gamesProcessed++;
+
+        // Yield to the browser every 3 games to keep UI responsive
+        if (gamesProcessed % 3 === 0) {
+          msgDiv.textContent = `Adding badges... (${gamesProcessed}/${sortedGames.length})`;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      } catch (error) {
+        console.warn(`Content: Error adding badge for "${game.name}":`, error);
       }
     }
+
+    console.log(`Content: Added ${totalBadgesAdded} badges for ${foundGames.length} games to the page.`);
 
     if (totalBadgesAdded > 0) {
-      console.log(`Content: Added ${totalBadgesAdded} badges to dynamically added content`);
-      messageDiv.textContent = `Added ${totalBadgesAdded} badge${totalBadgesAdded !== 1 ? 's' : ''} to new content`;
+      msgDiv.textContent = `Added ${totalBadgesAdded} badge${totalBadgesAdded !== 1 ? 's' : ''}`;
       setTimeout(() => {
-        messageDiv.style.display = 'none';
+        msgDiv.style.display = 'none';
       }, 2000);
     } else {
-      messageDiv.style.display = 'none';
+      msgDiv.style.display = 'none';
     }
   } catch (error) {
-    console.error('Content: Error processing pending elements:', error);
-    messageDiv.textContent = `Error processing new content`;
+    console.error('Content: Error processing page for badges:', error);
+    msgDiv.textContent = `Error: ${error instanceof Error ? error.message : String(error)}`;
     setTimeout(() => {
-      messageDiv.style.display = 'none';
+      msgDiv.style.display = 'none';
     }, 3000);
-  } finally {
-    isProcessing = false;
-    // Wait a bit before clearing the flag to ensure all mutations from our changes are caught
-    setTimeout(() => {
-      isExtensionModifying = false;
-    }, 100);
   }
 }
 
-// Setup mutation observer with throttling
-function setupMutationObserver() {
-  if (document.readyState !== 'complete') {
-    console.log('Content: Waiting for page to finish loading before setting up observer...');
-    window.addEventListener('load', () => {
-      console.log('Content: Page loaded, setting up MutationObserver');
-      setupMutationObserver();
-    }, { once: true });
-    return;
+// Setup URL change monitoring with temporary mutation observer
+function setupUrlChangeMonitoring() {
+  console.log('Content: Setting up URL change monitoring...');
+
+  // Handle popstate (back/forward navigation)
+  window.addEventListener('popstate', () => {
+    const newUrl = window.location.href;
+    if (newUrl !== currentUrl) {
+      currentUrl = newUrl;
+      console.log('Content: URL changed via popstate to:', currentUrl);
+      waitForDOMToSettle();
+    }
+  });
+
+  // Monitor for pushState/replaceState (SPA navigation)
+  const originalPushState = history.pushState.bind(history);
+  const originalReplaceState = history.replaceState.bind(history);
+
+  history.pushState = function(state: any, unused: string, url?: string | URL | null) {
+    originalPushState(state, unused, url);
+    const newUrl = window.location.href;
+    if (newUrl !== currentUrl) {
+      currentUrl = newUrl;
+      console.log('Content: URL changed via pushState to:', currentUrl);
+      waitForDOMToSettle();
+    }
+  };
+
+  history.replaceState = function(state: any, unused: string, url?: string | URL | null) {
+    originalReplaceState(state, unused, url);
+    const newUrl = window.location.href;
+    if (newUrl !== currentUrl) {
+      currentUrl = newUrl;
+      console.log('Content: URL changed via replaceState to:', currentUrl);
+      waitForDOMToSettle();
+    }
+  };
+
+  // Also use a setInterval as a fallback to catch any URL changes we might miss
+  setInterval(() => {
+    const newUrl = window.location.href;
+    if (newUrl !== currentUrl) {
+      currentUrl = newUrl;
+      console.log('Content: URL changed (detected via polling) to:', currentUrl);
+      waitForDOMToSettle();
+    }
+  }, 500);
+
+  console.log('Content: URL change monitoring setup complete');
+}
+
+// Wait for DOM changes to settle after URL change, then process badges
+function waitForDOMToSettle() {
+  // Disconnect any existing observer
+  if (urlChangeObserver) {
+    urlChangeObserver.disconnect();
+    urlChangeObserver = null;
   }
 
-  if (mutationObserver) {
-    mutationObserver.disconnect();
+  // Clear any existing timeout
+  if (urlChangeTimeout) {
+    clearTimeout(urlChangeTimeout);
+    urlChangeTimeout = null;
   }
 
-  mutationObserver = new MutationObserver((mutations) => {
-    // Ignore all mutations while extension is actively modifying the DOM
-    if (isExtensionModifying || !gameNameMap || gameNameMap.size === 0) {
-      return;
+  // Create a temporary mutation observer to detect when DOM changes stop
+  urlChangeObserver = new MutationObserver(() => {
+    // Reset the timeout every time a mutation occurs
+    if (urlChangeTimeout) {
+      clearTimeout(urlChangeTimeout);
     }
 
-    let hasNewElements = false;
+    // Wait 1000ms after the last mutation before processing
+    urlChangeTimeout = setTimeout(() => {
+      console.log('Content: DOM settled after URL change, processing badges...');
 
-    for (const mutation of mutations) {
-      if (mutation.type === 'childList') {
-        mutation.addedNodes.forEach((node) => {
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const element = node as Element;
-
-            // Skip if it's one of our own elements
-            if (
-              element.hasAttribute('data-bgg-rating-badge') ||
-              element.hasAttribute('data-bgg-wrapper') ||
-              element.hasAttribute('data-bgg-message') ||
-              element.hasAttribute('data-bgg-tooltip') ||
-              element.closest('[data-bgg-wrapper]') ||
-              element.closest('[data-bgg-tooltip]')
-            ) {
-              return;
-            }
-
-            // Skip if it contains our markers (this means we just modified it)
-            if (
-              element.querySelector('[data-bgg-rating-badge]') ||
-              element.querySelector('[data-bgg-wrapper]')
-            ) {
-              return;
-            }
-
-            // Only add if it has text content that might contain game names
-            if (element.textContent && element.textContent.trim().length > 0) {
-              pendingElements.push(element);
-              hasNewElements = true;
-            }
-          }
-        });
+      // Disconnect the observer
+      if (urlChangeObserver) {
+        urlChangeObserver.disconnect();
+        urlChangeObserver = null;
       }
-    }
 
-    // Only set timeout if we actually found new elements
-    if (!hasNewElements) {
-      return;
-    }
-
-    // Throttle: wait 1000ms after last mutation (increased from 500ms)
-    if (mutationTimeout) {
-      clearTimeout(mutationTimeout);
-    }
-
-    mutationTimeout = setTimeout(() => {
-      mutationTimeout = null;
-      processPendingElements();
+      // Process badges for the new page content
+      processBadgesForPage();
     }, 1000);
   });
 
-  mutationObserver.observe(document.body, {
+  // Start observing
+  urlChangeObserver.observe(document.body, {
     childList: true,
     subtree: true,
   });
 
-  console.log('Content: MutationObserver setup complete');
+  console.log('Content: Waiting for DOM to settle...');
 }
 
 // Main function to run the extension
@@ -611,7 +729,7 @@ async function runExtension() {
     }
 
     console.log(`Content: Added badges for ${foundGames.length} games to the page.`);
-    setupMutationObserver();
+    setupUrlChangeMonitoring();
     messageDiv.style.display = 'none';
   } catch (error) {
     console.error('Content: Error in runExtension:', error);
@@ -662,20 +780,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('Content script received removeBadges.');
 
     // Disconnect and clean up mutation observer
-    if (mutationObserver) {
-      mutationObserver.disconnect();
-      mutationObserver = null;
-    }
-
-    if (mutationTimeout) {
-      clearTimeout(mutationTimeout);
-      mutationTimeout = null;
+    if (urlChangeObserver) {
+      urlChangeObserver.disconnect();
+      urlChangeObserver = null;
     }
 
     // Clear state
     gameNameMap = null;
-    pendingElements = [];
-    isProcessing = false;
+    currentUrl = window.location.href;
+    statsShown = false;
 
     // Remove all badges and wrappers
     const badges = document.querySelectorAll('[data-bgg-rating-badge]');
@@ -696,8 +809,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     console.log(`Content: Removed ${wrappers.length} wrappers and ${badges.length} badges`);
 
-    // Update state
-    statsShown = false;
 
     sendResponse({ success: true });
   } else if (request.action === 'displayMessage') {

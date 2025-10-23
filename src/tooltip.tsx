@@ -29,7 +29,6 @@ const bggApiCache: Map<string, BggApiGameDetail> = new Map();
 
 // Global tooltip element
 let tooltipElement: HTMLElement | null = null;
-let currentTooltipTarget: HTMLElement | null = null;
 let tooltipTimeout: number | null = null;
 
 // Helper function to fetch game details from BGG API
@@ -229,7 +228,6 @@ function createTooltip(wrapper: HTMLElement, gameId: string): void {
   }
 
   tooltipElement = tooltip;
-  currentTooltipTarget = wrapper;
 
   // Fetch and display game details
   fetchBggGameDetails(gameId).then((details) => {
@@ -510,5 +508,4 @@ function hideTooltip(): void {
     tooltipElement.remove();
     tooltipElement = null;
   }
-  currentTooltipTarget = null;
 }
