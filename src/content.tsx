@@ -10,7 +10,7 @@ interface GameData {
 }
 
 // Global state for mutation observer and game data
-let gameNameMap: Map<string, GameData> | null = null;
+let currentBggData: GameData[] | null = null;
 let urlChangeObserver: MutationObserver | null = null;
 let urlChangeTimeout: NodeJS.Timeout | null = null;
 let currentUrl: string = window.location.href;
@@ -87,7 +87,7 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
   const startTime = performance.now();
   console.log('Content: [TIMING] processBadgesForPage started');
 
-  if (!gameNameMap || gameNameMap.size === 0) {
+  if (!currentBggData || currentBggData.length === 0) {
     return;
   }
 
@@ -129,14 +129,14 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
 
     const foundGames: GameData[] = [];
 
-    for (const [gameName, gameData] of gameNameMap) {
+    for (const gameData of currentBggData) {
       try {
-        const regex = createGameNameRegex(gameName);
+        const regex = createGameNameRegex(gameData.name);
         if (regex.test(pageText)) {
           foundGames.push(gameData);
         }
       } catch (error) {
-        console.warn(`Content: Skipping game "${gameName}" due to regex error:`, error);
+        console.warn(`Content: Skipping game "${gameData.name}" due to regex error:`, error);
       }
     }
 
@@ -438,7 +438,7 @@ async function runExtension() {
     console.log(`Content: [TIMING] Getting BGG data from background took ${(getBggDataEnd - getBggDataStart).toFixed(2)}ms`);
 
     const { bggData, isOld } = responseFromBackground;
-    let currentBggData: GameData[] = bggData || [];
+    currentBggData = bggData || [];
 
     console.log('Content: Received bggData:', currentBggData ? `${currentBggData.length} games` : 'null', 'isOld:', isOld);
 
@@ -481,185 +481,20 @@ async function runExtension() {
       return;
     }
 
-    // Build game name map
-    messageDiv.textContent = 'Building game index...';
+    // Filter out games with numeric-only names
     const buildMapStart = performance.now();
-    gameNameMap = new Map();
-    for (const game of currentBggData) {
-      if (/^\d{1,3}$/.test(game.name)) {
-        continue;
-      }
-      gameNameMap.set(game.name, game);
-    }
+    currentBggData = currentBggData.filter(game => !/^\d{1,3}$/.test(game.name));
     const buildMapEnd = performance.now();
-    console.log(`Content: [TIMING] Building game name map took ${(buildMapEnd - buildMapStart).toFixed(2)}ms`);
-    console.log(`Content: Built game name map with ${gameNameMap.size} games`);
+    console.log(`Content: [TIMING] Filtering games took ${(buildMapEnd - buildMapStart).toFixed(2)}ms`);
+    console.log(`Content: Using ${currentBggData.length} games`);
 
-    messageDiv.textContent = 'Searching page for board games...';
-
-    // Find games mentioned on the page ONCE (not per element)
-    const searchStart = performance.now();
-    const pageText = document.body.innerText;
-    const pageTextTime = performance.now();
-    console.log(`Content: [TIMING] Getting page text took ${(pageTextTime - searchStart).toFixed(2)}ms`);
-
-    const foundGames: GameData[] = [];
-
-    for (const [gameName, gameData] of gameNameMap) {
-      try {
-        const regex = createGameNameRegex(gameName);
-        if (regex.test(pageText)) {
-          foundGames.push(gameData);
-        }
-      } catch (error) {
-        console.warn(`Content: Skipping game "${gameName}" due to regex error:`, error);
-      }
-    }
-
-    const searchEnd = performance.now();
-    console.log(`Content: [TIMING] Searching for games in runExtension took ${(searchEnd - pageTextTime).toFixed(2)}ms`);
-    console.log(`Content: Found ${foundGames.length} games mentioned on page`);
-
-    if (foundGames.length === 0) {
-      messageDiv.textContent = 'No board games found on this page.';
-      setTimeout(() => {
-        messageDiv.style.display = 'none';
-      }, 2000);
-      console.log(`Content: [TIMING] Total runExtension took ${(performance.now() - extensionStartTime).toFixed(2)}ms`);
-      return;
-    }
-
-    // Sort games by name length (longest first) to match longer titles before shorter ones
-    const sortStart = performance.now();
-    const sortedGames = [...foundGames].sort((a, b) => b.name.length - a.name.length);
-    const sortEnd = performance.now();
-    console.log(`Content: [TIMING] Sorting games in runExtension took ${(sortEnd - sortStart).toFixed(2)}ms`);
-
-    let gamesProcessed = 0;
-
-    // Process games and add badges
-    const badgeProcessStart = performance.now();
-    for (const game of sortedGames) {
-      const gameStart = performance.now();
-      try {
-        const regex = createGameNameRegex(game.name);
-
-        const walkerStart = performance.now();
-        const walker = document.createTreeWalker(
-          document.body,
-          NodeFilter.SHOW_TEXT,
-          {
-            acceptNode: function (node) {
-              const parent = node.parentElement;
-              if (
-                !parent ||
-                parent.closest('script, style, noscript') ||
-                parent === messageDiv ||
-                messageDiv.contains(parent)
-              ) {
-                return NodeFilter.FILTER_REJECT;
-              }
-              if (
-                parent.querySelector('[data-bgg-rating-badge]') ||
-                parent.closest('[data-bgg-wrapper]')
-              ) {
-                return NodeFilter.FILTER_REJECT;
-              }
-              return regex.test(node.textContent || '')
-                ? NodeFilter.FILTER_ACCEPT
-                : NodeFilter.FILTER_REJECT;
-            },
-          }
-        );
-
-        const nodesToProcess: { node: Text }[] = [];
-        let currentNode: Node | null;
-
-        while ((currentNode = walker.nextNode())) {
-          const textNode = currentNode as Text;
-          if (textNode.textContent?.match(regex)) {
-            nodesToProcess.push({ node: textNode });
-          }
-        }
-        const walkerEnd = performance.now();
-
-        const replaceStart = performance.now();
-        nodesToProcess.forEach(({ node }) => {
-          const parent = node.parentElement;
-          if (!parent) return;
-
-          if (
-            parent.querySelector('[data-bgg-rating-badge]') ||
-            parent.closest('[data-bgg-wrapper]')
-          ) {
-            return;
-          }
-
-          const text = node.textContent || '';
-          const match = regex.exec(text);
-          if (!match) return;
-
-          const matchIndex = match.index;
-          const matchText = match[0];
-
-          const beforeText = text.substring(0, matchIndex);
-          const afterText = text.substring(matchIndex + matchText.length);
-
-          const beforeNode = document.createTextNode(beforeText);
-          const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
-          const matchNode = document.createTextNode(matchText);
-          const afterNode = document.createTextNode(afterText);
-
-          const wrapper = document.createElement('span');
-          wrapper.setAttribute('data-bgg-wrapper', 'true');
-          wrapper.style.cssText = `
-            background-color: #e6f2ff;
-            padding: 1px 3px;
-            border-radius: 2px;
-            display: inline;
-            line-height: inherit;
-          `;
-          wrapper.appendChild(badge);
-          wrapper.appendChild(matchNode);
-
-          wireTooltip(wrapper, game.id);
-
-          const fragment = document.createDocumentFragment();
-          if (beforeText) fragment.appendChild(beforeNode);
-          fragment.appendChild(wrapper);
-          if (afterText) fragment.appendChild(afterNode);
-
-          parent.replaceChild(fragment, node);
-        });
-        const replaceEnd = performance.now();
-
-        gamesProcessed++;
-        const gameEnd = performance.now();
-        const gameTime = gameEnd - gameStart;
-        if (gameTime > 10) { // Only log slow games
-          console.log(`Content: [TIMING] Game "${game.name}" in runExtension took ${gameTime.toFixed(2)}ms (walker: ${(walkerEnd - walkerStart).toFixed(2)}ms, replace: ${(replaceEnd - replaceStart).toFixed(2)}ms, nodes: ${nodesToProcess.length})`);
-        }
-
-        // Yield to the browser every 3 games to keep UI responsive
-        if (gamesProcessed % 3 === 0) {
-          messageDiv.textContent = `Adding badges... (${gamesProcessed}/${sortedGames.length})`;
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
-      } catch (error) {
-        console.warn(`Content: Error adding badge for "${game.name}":`, error);
-      }
-    }
-    const badgeProcessEnd = performance.now();
-    console.log(`Content: [TIMING] Adding badges in runExtension took ${(badgeProcessEnd - badgeProcessStart).toFixed(2)}ms`);
-
-    console.log(`Content: Added badges for ${foundGames.length} games to the page.`);
+    // Now use processBadgesForPage function to add badges
+    await processBadgesForPage(messageDiv);
 
     const setupMonitorStart = performance.now();
     setupUrlChangeMonitoring();
     const setupMonitorEnd = performance.now();
     console.log(`Content: [TIMING] Setting up URL monitoring took ${(setupMonitorEnd - setupMonitorStart).toFixed(2)}ms`);
-
-    messageDiv.style.display = 'none';
 
     const extensionEndTime = performance.now();
     console.log(`Content: [TIMING] Total runExtension took ${(extensionEndTime - extensionStartTime).toFixed(2)}ms`);
@@ -719,7 +554,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     // Clear state
-    gameNameMap = null;
     currentUrl = window.location.href;
     statsShown = false;
 
