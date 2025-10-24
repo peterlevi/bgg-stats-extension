@@ -19,7 +19,6 @@ let statsShown: boolean = false; // Track whether stats are currently shown
 
 // Storage keys
 const CASE_INSENSITIVE_DOMAINS_KEY = "bggCaseInsensitiveDomains";
-const EXTENSION_WORKING_KEY = "bggExtensionWorking";
 
 // Helper function to notify popup/background of working state
 function notifyWorkingState(working: boolean) {
@@ -83,149 +82,11 @@ function createRatingBadge(
   return badge;
 }
 
-// Process a specific element for game badges
-async function processElementForGames(
-  element: Element,
-  messageDiv?: HTMLElement,
-  showProgress: boolean = false
-): Promise<number> {
-  if (!gameNameMap || gameNameMap.size === 0) {
-    return 0;
-  }
-
-  let badgesAdded = 0;
-  const pageText = element.textContent || '';
-
-  if (!pageText.trim()) {
-    return 0;
-  }
-
-  // Find games that might be mentioned in this element
-  const foundGames: GameData[] = [];
-  for (const [gameName, gameData] of gameNameMap) {
-    try {
-      const regex = createGameNameRegex(gameName);
-      if (regex.test(pageText)) {
-        foundGames.push(gameData);
-      }
-    } catch (error) {
-      console.warn(`Content: Skipping game "${gameName}" due to regex error:`, error);
-    }
-  }
-
-  if (foundGames.length === 0) {
-    return 0;
-  }
-
-  const sortedGames = [...foundGames].sort((a, b) => b.name.length - a.name.length);
-  let gamesProcessed = 0;
-
-  for (const game of sortedGames) {
-    try {
-      const regex = createGameNameRegex(game.name);
-
-      const walker = document.createTreeWalker(
-        element,
-        NodeFilter.SHOW_TEXT,
-        {
-          acceptNode: function (node) {
-            const parent = node.parentElement;
-            if (
-              !parent ||
-              parent.closest('script, style, noscript') ||
-              (messageDiv && (parent === messageDiv || messageDiv.contains(parent)))
-            ) {
-              return NodeFilter.FILTER_REJECT;
-            }
-            if (
-              parent.querySelector('[data-bgg-rating-badge]') ||
-              parent.closest('[data-bgg-wrapper]')
-            ) {
-              return NodeFilter.FILTER_REJECT;
-            }
-            return regex.test(node.textContent || '')
-              ? NodeFilter.FILTER_ACCEPT
-              : NodeFilter.FILTER_REJECT;
-          },
-        }
-      );
-
-      const nodesToProcess: { node: Text }[] = [];
-      let currentNode: Node | null;
-
-      while ((currentNode = walker.nextNode())) {
-        const textNode = currentNode as Text;
-        if (textNode.textContent?.match(regex)) {
-          nodesToProcess.push({ node: textNode });
-        }
-      }
-
-      nodesToProcess.forEach(({ node }) => {
-        const parent = node.parentElement;
-        if (!parent) return;
-
-        if (
-          parent.querySelector('[data-bgg-rating-badge]') ||
-          parent.closest('[data-bgg-wrapper]')
-        ) {
-          return;
-        }
-
-        const text = node.textContent || '';
-        const match = regex.exec(text);
-        if (!match) return;
-
-        const matchIndex = match.index;
-        const matchText = match[0];
-
-        const beforeText = text.substring(0, matchIndex);
-        const afterText = text.substring(matchIndex + matchText.length);
-
-        const beforeNode = document.createTextNode(beforeText);
-        const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
-        const matchNode = document.createTextNode(matchText);
-        const afterNode = document.createTextNode(afterText);
-
-        const wrapper = document.createElement('span');
-        wrapper.setAttribute('data-bgg-wrapper', 'true');
-        wrapper.style.cssText = `
-          background-color: #e6f2ff;
-          padding: 1px 3px;
-          border-radius: 2px;
-          display: inline;
-          line-height: inherit;
-        `;
-        wrapper.appendChild(badge);
-        wrapper.appendChild(matchNode);
-
-        wireTooltip(wrapper, game.id);
-
-        const fragment = document.createDocumentFragment();
-        if (beforeText) fragment.appendChild(beforeNode);
-        fragment.appendChild(wrapper);
-        if (afterText) fragment.appendChild(afterNode);
-
-        parent.replaceChild(fragment, node);
-        badgesAdded++;
-      });
-
-      gamesProcessed++;
-
-      if (showProgress && gamesProcessed % 5 === 0 && messageDiv) {
-        messageDiv.textContent = `Adding badges... (${gamesProcessed}/${sortedGames.length})`;
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    } catch (error) {
-      console.warn(`Content: Error adding badge for "${game.name}":`, error);
-    }
-  }
-
-  return badgesAdded;
-}
-
-
 // Process the entire page for game badges
 async function processBadgesForPage(messageDiv?: HTMLElement) {
+  const startTime = performance.now();
+  console.log('Content: [TIMING] processBadgesForPage started');
+
   if (!gameNameMap || gameNameMap.size === 0) {
     return;
   }
@@ -261,7 +122,11 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
 
   try {
     // Find games mentioned on the page
+    const searchStartTime = performance.now();
     const pageText = document.body.innerText;
+    const pageTextTime = performance.now();
+    console.log(`Content: [TIMING] Getting page text took ${(pageTextTime - searchStartTime).toFixed(2)}ms`);
+
     const foundGames: GameData[] = [];
 
     for (const [gameName, gameData] of gameNameMap) {
@@ -275,6 +140,8 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
       }
     }
 
+    const searchEndTime = performance.now();
+    console.log(`Content: [TIMING] Searching for games took ${(searchEndTime - pageTextTime).toFixed(2)}ms`);
     console.log(`Content: Found ${foundGames.length} games mentioned on page`);
 
     if (foundGames.length === 0) {
@@ -282,19 +149,27 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
       setTimeout(() => {
         msgDiv.style.display = 'none';
       }, 2000);
+      console.log(`Content: [TIMING] Total processBadgesForPage took ${(performance.now() - startTime).toFixed(2)}ms`);
       return;
     }
 
     // Sort games by name length (longest first) to match longer titles before shorter ones
+    const sortStartTime = performance.now();
     const sortedGames = [...foundGames].sort((a, b) => b.name.length - a.name.length);
+    const sortEndTime = performance.now();
+    console.log(`Content: [TIMING] Sorting games took ${(sortEndTime - sortStartTime).toFixed(2)}ms`);
+
     let gamesProcessed = 0;
     let totalBadgesAdded = 0;
 
     // Process games and add badges
+    const badgeStartTime = performance.now();
     for (const game of sortedGames) {
+      const gameStartTime = performance.now();
       try {
         const regex = createGameNameRegex(game.name);
 
+        const walkerStartTime = performance.now();
         const walker = document.createTreeWalker(
           document.body,
           NodeFilter.SHOW_TEXT,
@@ -330,7 +205,9 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
             nodesToProcess.push({ node: textNode });
           }
         }
+        const walkerEndTime = performance.now();
 
+        const replaceStartTime = performance.now();
         nodesToProcess.forEach(({ node }) => {
           const parent = node.parentElement;
           if (!parent) return;
@@ -379,8 +256,14 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
           parent.replaceChild(fragment, node);
           totalBadgesAdded++;
         });
+        const replaceEndTime = performance.now();
 
         gamesProcessed++;
+        const gameEndTime = performance.now();
+        const gameTotalTime = gameEndTime - gameStartTime;
+        if (gameTotalTime > 10) { // Only log slow games
+          console.log(`Content: [TIMING] Game "${game.name}" took ${gameTotalTime.toFixed(2)}ms (walker: ${(walkerEndTime - walkerStartTime).toFixed(2)}ms, replace: ${(replaceEndTime - replaceStartTime).toFixed(2)}ms, nodes: ${nodesToProcess.length})`);
+        }
 
         // Yield to the browser every 3 games to keep UI responsive
         if (gamesProcessed % 3 === 0) {
@@ -391,6 +274,8 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
         console.warn(`Content: Error adding badge for "${game.name}":`, error);
       }
     }
+    const badgeEndTime = performance.now();
+    console.log(`Content: [TIMING] Adding badges took ${(badgeEndTime - badgeStartTime).toFixed(2)}ms`);
 
     console.log(`Content: Added ${totalBadgesAdded} badges for ${foundGames.length} games to the page.`);
 
@@ -402,12 +287,16 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
     } else {
       msgDiv.style.display = 'none';
     }
+
+    const totalTime = performance.now() - startTime;
+    console.log(`Content: [TIMING] Total processBadgesForPage took ${totalTime.toFixed(2)}ms`);
   } catch (error) {
     console.error('Content: Error processing page for badges:', error);
     msgDiv.textContent = `Error: ${error instanceof Error ? error.message : String(error)}`;
     setTimeout(() => {
       msgDiv.style.display = 'none';
     }, 3000);
+    console.log(`Content: [TIMING] Total processBadgesForPage (with error) took ${(performance.now() - startTime).toFixed(2)}ms`);
   }
 }
 
@@ -509,6 +398,8 @@ function waitForDOMToSettle() {
 
 // Main function to run the extension
 async function runExtension() {
+  const extensionStartTime = performance.now();
+  console.log('Content: [TIMING] runExtension started');
   console.log('Content script running extension.');
   const messageDiv = document.createElement('div');
   messageDiv.setAttribute('data-bgg-message', 'true');
@@ -530,6 +421,7 @@ async function runExtension() {
   try {
     messageDiv.textContent = 'Checking BGG data...';
     let responseFromBackground;
+    const getBggDataStart = performance.now();
     try {
       responseFromBackground = await chrome.runtime.sendMessage({
         action: 'getBggData',
@@ -542,6 +434,8 @@ async function runExtension() {
       }, 3000);
       return;
     }
+    const getBggDataEnd = performance.now();
+    console.log(`Content: [TIMING] Getting BGG data from background took ${(getBggDataEnd - getBggDataStart).toFixed(2)}ms`);
 
     const { bggData, isOld } = responseFromBackground;
     let currentBggData: GameData[] = bggData || [];
@@ -563,9 +457,12 @@ async function runExtension() {
       } else {
         messageDiv.textContent = 'Fetching game data from BGG...';
         console.log('Content: Fetching BGG data from background...');
+        const fetchStart = performance.now();
         const fetchResponse = await chrome.runtime.sendMessage({
           action: 'fetchBggData',
         });
+        const fetchEnd = performance.now();
+        console.log(`Content: [TIMING] Fetching BGG data took ${(fetchEnd - fetchStart).toFixed(2)}ms`);
         console.log('Content: Fetch response:', fetchResponse);
         if (!fetchResponse.success) {
           throw new Error(fetchResponse.error);
@@ -586,6 +483,7 @@ async function runExtension() {
 
     // Build game name map
     messageDiv.textContent = 'Building game index...';
+    const buildMapStart = performance.now();
     gameNameMap = new Map();
     for (const game of currentBggData) {
       if (/^\d{1,3}$/.test(game.name)) {
@@ -593,12 +491,18 @@ async function runExtension() {
       }
       gameNameMap.set(game.name, game);
     }
+    const buildMapEnd = performance.now();
+    console.log(`Content: [TIMING] Building game name map took ${(buildMapEnd - buildMapStart).toFixed(2)}ms`);
     console.log(`Content: Built game name map with ${gameNameMap.size} games`);
 
     messageDiv.textContent = 'Searching page for board games...';
 
     // Find games mentioned on the page ONCE (not per element)
+    const searchStart = performance.now();
     const pageText = document.body.innerText;
+    const pageTextTime = performance.now();
+    console.log(`Content: [TIMING] Getting page text took ${(pageTextTime - searchStart).toFixed(2)}ms`);
+
     const foundGames: GameData[] = [];
 
     for (const [gameName, gameData] of gameNameMap) {
@@ -612,6 +516,8 @@ async function runExtension() {
       }
     }
 
+    const searchEnd = performance.now();
+    console.log(`Content: [TIMING] Searching for games in runExtension took ${(searchEnd - pageTextTime).toFixed(2)}ms`);
     console.log(`Content: Found ${foundGames.length} games mentioned on page`);
 
     if (foundGames.length === 0) {
@@ -619,18 +525,26 @@ async function runExtension() {
       setTimeout(() => {
         messageDiv.style.display = 'none';
       }, 2000);
+      console.log(`Content: [TIMING] Total runExtension took ${(performance.now() - extensionStartTime).toFixed(2)}ms`);
       return;
     }
 
     // Sort games by name length (longest first) to match longer titles before shorter ones
+    const sortStart = performance.now();
     const sortedGames = [...foundGames].sort((a, b) => b.name.length - a.name.length);
+    const sortEnd = performance.now();
+    console.log(`Content: [TIMING] Sorting games in runExtension took ${(sortEnd - sortStart).toFixed(2)}ms`);
+
     let gamesProcessed = 0;
 
     // Process games and add badges
+    const badgeProcessStart = performance.now();
     for (const game of sortedGames) {
+      const gameStart = performance.now();
       try {
         const regex = createGameNameRegex(game.name);
 
+        const walkerStart = performance.now();
         const walker = document.createTreeWalker(
           document.body,
           NodeFilter.SHOW_TEXT,
@@ -667,7 +581,9 @@ async function runExtension() {
             nodesToProcess.push({ node: textNode });
           }
         }
+        const walkerEnd = performance.now();
 
+        const replaceStart = performance.now();
         nodesToProcess.forEach(({ node }) => {
           const parent = node.parentElement;
           if (!parent) return;
@@ -715,8 +631,14 @@ async function runExtension() {
 
           parent.replaceChild(fragment, node);
         });
+        const replaceEnd = performance.now();
 
         gamesProcessed++;
+        const gameEnd = performance.now();
+        const gameTime = gameEnd - gameStart;
+        if (gameTime > 10) { // Only log slow games
+          console.log(`Content: [TIMING] Game "${game.name}" in runExtension took ${gameTime.toFixed(2)}ms (walker: ${(walkerEnd - walkerStart).toFixed(2)}ms, replace: ${(replaceEnd - replaceStart).toFixed(2)}ms, nodes: ${nodesToProcess.length})`);
+        }
 
         // Yield to the browser every 3 games to keep UI responsive
         if (gamesProcessed % 3 === 0) {
@@ -727,16 +649,27 @@ async function runExtension() {
         console.warn(`Content: Error adding badge for "${game.name}":`, error);
       }
     }
+    const badgeProcessEnd = performance.now();
+    console.log(`Content: [TIMING] Adding badges in runExtension took ${(badgeProcessEnd - badgeProcessStart).toFixed(2)}ms`);
 
     console.log(`Content: Added badges for ${foundGames.length} games to the page.`);
+
+    const setupMonitorStart = performance.now();
     setupUrlChangeMonitoring();
+    const setupMonitorEnd = performance.now();
+    console.log(`Content: [TIMING] Setting up URL monitoring took ${(setupMonitorEnd - setupMonitorStart).toFixed(2)}ms`);
+
     messageDiv.style.display = 'none';
+
+    const extensionEndTime = performance.now();
+    console.log(`Content: [TIMING] Total runExtension took ${(extensionEndTime - extensionStartTime).toFixed(2)}ms`);
   } catch (error) {
     console.error('Content: Error in runExtension:', error);
     messageDiv.textContent = `Error: ${error instanceof Error ? error.message : String(error)}`;
     setTimeout(() => {
       messageDiv.style.display = 'none';
     }, 3000);
+    console.log(`Content: [TIMING] Total runExtension (with error) took ${(performance.now() - extensionStartTime).toFixed(2)}ms`);
   }
 }
 
