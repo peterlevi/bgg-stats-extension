@@ -43,12 +43,12 @@ function escapeRegex(str: string): string {
 // Helper function to create a regex pattern that handles punctuation in game names
 function createGameNameRegex(gameName: string): RegExp {
   const escapedName = escapeRegex(gameName);
-  // Use a more flexible boundary that works with punctuation
+  // Use lookbehind and lookahead assertions to match word boundaries
   // Match if preceded by start of string, whitespace, or punctuation
   // and followed by end of string, whitespace, or punctuation
   // Use case-insensitive flag if enabled
   const flags = useCaseInsensitive ? 'gi' : 'g';
-  return new RegExp(`(?:^|\\s|[.!?,:;'"()\\[\\]{}])${escapedName}(?=$|\\s|[.!?,:;'"()\\[\\]{}])`, flags);
+  return new RegExp(`(?<=^|\\s|[.!?,:;'"()\\[\\]{}])${escapedName}(?=$|\\s|[.!?,:;'"()\\[\\]{}])`, flags);
 }
 
 // Helper function to create hexagon badge
@@ -229,10 +229,8 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
           const beforeText = text.substring(0, matchIndex);
           const afterText = text.substring(matchIndex + matchText.length);
 
-          const beforeNode = document.createTextNode(beforeText);
           const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
           const matchNode = document.createTextNode(matchText);
-          const afterNode = document.createTextNode(afterText);
 
           const wrapper = document.createElement('span');
           wrapper.setAttribute('data-bgg-wrapper', 'true');
@@ -248,12 +246,20 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
 
           wireTooltip(wrapper, game.id);
 
-          const fragment = document.createDocumentFragment();
-          if (beforeText) fragment.appendChild(beforeNode);
-          fragment.appendChild(wrapper);
-          if (afterText) fragment.appendChild(afterNode);
+          // Insert nodes using insertBefore instead of replaceChild
+          // This works better with all types of parent elements
+          if (beforeText) {
+            const beforeNode = document.createTextNode(beforeText);
+            parent.insertBefore(beforeNode, node);
+          }
+          parent.insertBefore(wrapper, node);
+          if (afterText) {
+            const afterNode = document.createTextNode(afterText);
+            parent.insertBefore(afterNode, node);
+          }
+          // Now remove the original text node
+          parent.removeChild(node);
 
-          parent.replaceChild(fragment, node);
           totalBadgesAdded++;
         });
         const replaceEndTime = performance.now();
@@ -481,11 +487,32 @@ async function runExtension() {
       return;
     }
 
-    // Filter out games with numeric-only names
+    // Filter out games with numeric-only names and deduplicate by name, keeping highest rank (lowest number)
     const buildMapStart = performance.now();
-    currentBggData = currentBggData.filter(game => !/^\d{1,3}$/.test(game.name));
+    const gamesByName = new Map<string, GameData>();
+
+    for (const game of currentBggData) {
+      // Skip numeric-only names
+      if (/^\d{1,3}$/.test(game.name)) {
+        continue;
+      }
+
+      const existing = gamesByName.get(game.name);
+      if (!existing) {
+        gamesByName.set(game.name, game);
+      } else {
+        // Keep the game with the better (lower) rank
+        const existingRank = parseInt(existing.rank) || Infinity;
+        const newRank = parseInt(game.rank) || Infinity;
+        if (newRank < existingRank) {
+          gamesByName.set(game.name, game);
+        }
+      }
+    }
+
+    currentBggData = Array.from(gamesByName.values());
     const buildMapEnd = performance.now();
-    console.log(`Content: [TIMING] Filtering games took ${(buildMapEnd - buildMapStart).toFixed(2)}ms`);
+    console.log(`Content: [TIMING] Filtering and deduplicating games took ${(buildMapEnd - buildMapStart).toFixed(2)}ms`);
     console.log(`Content: Using ${currentBggData.length} games`);
 
     // Now use processBadgesForPage function to add badges
