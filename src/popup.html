@@ -62,6 +62,64 @@
       width: 16px;
       height: 16px;
     }
+
+    .token-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #ddd;
+    }
+
+    .token-label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+
+    .token-input {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 13px;
+      box-sizing: border-box;
+      font-family: monospace;
+    }
+
+    .token-input:focus {
+      outline: none;
+      border-color: #0066cc;
+    }
+
+    .token-help {
+      font-size: 12px;
+      color: #666;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+
+    .token-help a {
+      color: #0066cc;
+      text-decoration: none;
+    }
+
+    .token-help a:hover {
+      text-decoration: underline;
+    }
+
+    .token-status {
+      font-size: 12px;
+      margin-top: 8px;
+      padding: 6px;
+      border-radius: 4px;
+      display: none;
+    }
+
+    .token-status.saved {
+      background-color: #e8f5e9;
+      color: #2e7d32;
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -79,6 +137,26 @@
       <input type="checkbox" id="caseInsensitiveCheckbox">
       Case-insensitive matching on this domain
     </label>
+  </div>
+
+  <div class="token-section">
+    <!-- Show this when token is configured -->
+    <div id="tokenConfigured" style="display: none;">
+      <div style="color: #2e7d32; font-size: 13px; margin-bottom: 4px;">
+        ✓ API token configured. <a href="#" id="changeTokenLink" style="color: #0066cc; text-decoration: none;">Change</a>
+      </div>
+    </div>
+
+    <!-- Show this when no token or editing -->
+    <div id="tokenInput">
+      <label class="token-label">BGG API token:</label>
+
+      <input type="text" id="apiTokenInput" class="token-input" placeholder="Enter your BGG API token">
+      <div id="tokenStatus" class="token-status"></div>
+      <div class="token-help">
+        Required for detailed game tooltips. Create a token at <a href="https://boardgamegeek.com/applications" target="_blank">boardgamegeek.com/applications</a>
+      </div>
+    </div>
   </div>
 
   <script src="popup.js"></script>

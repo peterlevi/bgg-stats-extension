@@ -1,28 +1,8 @@
 import { getRatingColor } from './utils';
+import { fetchBggGameDetails as apiFetchBggGameDetails, BggApiGameDetail, NoApiTokenError } from './api';
 
-interface BggApiGameDetail {
-  id: string;
-  name: string;
-  yearpublished: string;
-  image: string;
-  thumbnail: string;
-  averageRating: string;
-  rank: string;
-  weight: string;
-  minplaytime: string;
-  maxplaytime: string;
-  minplayers: string;
-  maxplayers: string;
-  numRatings: string;
-  playerCountData: {
-    [playerCount: string]: {
-      best: number;
-      recommended: number;
-      notRecommended: number;
-      total: number;
-    };
-  };
-}
+// Storage key for BGG API token
+const BGG_API_TOKEN_KEY = "bggApiToken";
 
 // Cache for BGG API responses to avoid repeated requests
 const bggApiCache: Map<string, BggApiGameDetail> = new Map();
@@ -31,7 +11,18 @@ const bggApiCache: Map<string, BggApiGameDetail> = new Map();
 let tooltipElement: HTMLElement | null = null;
 let tooltipTimeout: number | null = null;
 
-// Helper function to fetch game details from BGG API
+// Helper function to get BGG API token from storage
+async function getBggApiToken(): Promise<string | undefined> {
+  try {
+    const result = await chrome.storage.local.get([BGG_API_TOKEN_KEY]);
+    return result[BGG_API_TOKEN_KEY];
+  } catch (error) {
+    console.error('Error retrieving BGG API token:', error);
+    return undefined;
+  }
+}
+
+// Helper function to fetch game details from BGG API with token
 async function fetchBggGameDetails(
   gameId: string
 ): Promise<BggApiGameDetail | null> {
@@ -40,106 +31,18 @@ async function fetchBggGameDetails(
     return bggApiCache.get(gameId)!;
   }
 
-  try {
-    // Fetch detailed game info including stats using the game ID directly
-    const detailUrl = `https://boardgamegeek.com/xmlapi2/thing?id=${gameId}&stats=1`;
-    const detailResponse = await fetch(detailUrl);
-    const detailXml = await detailResponse.text();
-    const searchParser = new DOMParser();
-    const detailDoc = searchParser.parseFromString(detailXml, 'text/xml');
+  // Get API token from storage
+  const apiToken = await getBggApiToken();
 
-    const item = detailDoc.querySelector('item');
-    if (!item) {
-      console.warn(`BGG API: No details found for game ID ${gameId}`);
-      return null;
-    }
+  // Use the pure API function (will throw NoApiTokenError if no token)
+  const gameDetail = await apiFetchBggGameDetails(gameId, apiToken);
 
-    // Extract game data
-    const primaryName =
-      item.querySelector('name[type="primary"]')?.getAttribute('value') || '';
-    const yearPublished =
-      item.querySelector('yearpublished')?.getAttribute('value') || '';
-    const image = item.querySelector('image')?.textContent || '';
-    const thumbnail = item.querySelector('thumbnail')?.textContent || '';
-    const avgRating =
-      item.querySelector('average')?.getAttribute('value') || '0';
-    const rankElement = item.querySelector('rank[name="boardgame"]');
-    const rank = rankElement?.getAttribute('value') || 'N/A';
-    const weight =
-      item.querySelector('averageweight')?.getAttribute('value') || '0';
-    const minplaytime =
-      item.querySelector('minplaytime')?.getAttribute('value') || '0';
-    const maxplaytime =
-      item.querySelector('maxplaytime')?.getAttribute('value') || '0';
-    const minplayers =
-      item.querySelector('minplayers')?.getAttribute('value') || '1';
-    const maxplayers =
-      item.querySelector('maxplayers')?.getAttribute('value') || '1';
-    const numRatings =
-      item.querySelector('usersrated')?.getAttribute('value') || '0';
-
-    // Extract player count poll data
-    const playerCountData: BggApiGameDetail['playerCountData'] = {};
-    const suggestedPlayersPoll = Array.from(
-      item.querySelectorAll('poll[name="suggested_numplayers"] results')
-    );
-
-    suggestedPlayersPoll.forEach((results) => {
-      const numPlayers = results.getAttribute('numplayers') || '';
-      const best = parseInt(
-        results
-          .querySelector('result[value="Best"]')
-          ?.getAttribute('numvotes') || '0'
-      );
-      const recommended = parseInt(
-        results
-          .querySelector('result[value="Recommended"]')
-          ?.getAttribute('numvotes') || '0'
-      );
-      const notRecommended = parseInt(
-        results
-          .querySelector('result[value="Not Recommended"]')
-          ?.getAttribute('numvotes') || '0'
-      );
-      const total = best + recommended + notRecommended;
-
-      if (total > 0) {
-        playerCountData[numPlayers] = {
-          best,
-          recommended,
-          notRecommended,
-          total,
-        };
-      }
-    });
-
-    const gameDetail: BggApiGameDetail = {
-      id: gameId,
-      name: primaryName,
-      yearpublished: yearPublished,
-      image,
-      thumbnail,
-      averageRating: avgRating,
-      rank,
-      weight,
-      minplaytime,
-      maxplaytime,
-      minplayers,
-      maxplayers,
-      numRatings,
-      playerCountData,
-    };
-
-    // Cache the result
+  // Cache the result if successful
+  if (gameDetail) {
     bggApiCache.set(gameId, gameDetail);
-    return gameDetail;
-  } catch (error) {
-    console.error(
-      `BGG API: Error fetching details for game ID ${gameId}:`,
-      error
-    );
-    return null;
   }
+
+  return gameDetail;
 }
 
 export function wireTooltip(wrapper: HTMLElement, gameId: string) {
@@ -241,6 +144,7 @@ function createTooltip(wrapper: HTMLElement, gameId: string): void {
             `;
       return;
     }
+
 
     // Build the tooltip content
     const ratingColor = getRatingColor(details.averageRating);
@@ -494,6 +398,33 @@ function createTooltip(wrapper: HTMLElement, gameId: string): void {
 
       // Hide details on click
       playerCountSummary.addEventListener('click', hidePlayerCountDetails);
+    }
+  }).catch((error) => {
+    if (!tooltipElement || tooltipElement !== tooltip) return; // Tooltip was removed
+
+    if (error instanceof NoApiTokenError) {
+      tooltip.innerHTML = `
+              <div style="padding: 16px; text-align: center;">
+                <div style="font-weight: bold; margin-bottom: 12px; color: #d32f2f;">API Token Required</div>
+                <div style="margin-bottom: 12px; line-height: 1.6; text-align: left;">
+                  To view detailed game information, you need to configure a BGG XML API token.
+                </div>
+                <div style="margin-bottom: 12px; text-align: left;">
+                  <strong>Steps:</strong>
+                  <ol style="margin: 8px 0; padding-left: 20px; text-align: left;">
+                    <li>Create a token at <a href="https://boardgamegeek.com/applications" target="_blank" rel="noopener noreferrer" style="color: #0066cc; text-decoration: none;">boardgamegeek.com/applications</a></li>
+                    <li>Copy the token</li>
+                    <li>Add it in the extension options</li>
+                  </ol>
+                </div>
+              </div>
+            `;
+    } else {
+      tooltip.innerHTML = `
+              <div style="text-align: center; padding: 20px; color: #666;">
+                Failed to load game details
+              </div>
+            `;
     }
   });
 }

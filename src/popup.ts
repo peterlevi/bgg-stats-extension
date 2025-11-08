@@ -2,10 +2,12 @@
 const ENABLED_DOMAINS_KEY = "bggEnabledDomains";
 const CASE_INSENSITIVE_DOMAINS_KEY = "bggCaseInsensitiveDomains";
 const EXTENSION_WORKING_KEY = "bggExtensionWorking";
+const BGG_API_TOKEN_KEY = "bggApiToken";
 
 let currentDomain: string = "";
 let isWorking: boolean = false;
 let isStatsShown: boolean = false;
+let isEditingToken: boolean = false; // Flag to prevent UI updates during token editing
 
 // Button states enum
 enum ButtonState {
@@ -90,6 +92,9 @@ async function setButtonState(state: ButtonState) {
 async function updateUI() {
   const autoRunCheckbox = document.getElementById("autoRunCheckbox") as HTMLInputElement;
   const caseInsensitiveCheckbox = document.getElementById("caseInsensitiveCheckbox") as HTMLInputElement;
+  const apiTokenInput = document.getElementById("apiTokenInput") as HTMLInputElement;
+  const tokenConfigured = document.getElementById("tokenConfigured");
+  const tokenInput = document.getElementById("tokenInput");
 
   const tab = await getCurrentTab();
   if (!tab.url || !tab.id) return;
@@ -100,12 +105,14 @@ async function updateUI() {
   const result = await chrome.storage.local.get([
     ENABLED_DOMAINS_KEY,
     CASE_INSENSITIVE_DOMAINS_KEY,
-    EXTENSION_WORKING_KEY
+    EXTENSION_WORKING_KEY,
+    BGG_API_TOKEN_KEY
   ]);
 
   const enabledDomains: string[] = result[ENABLED_DOMAINS_KEY] || [];
   const caseInsensitiveDomains: string[] = result[CASE_INSENSITIVE_DOMAINS_KEY] || [];
   const workingState: { [tabId: string]: boolean } = result[EXTENSION_WORKING_KEY] || {};
+  const apiToken: string = result[BGG_API_TOKEN_KEY] || '';
 
   // Check if stats are actually shown on the page
   isStatsShown = await checkStatsShown(tab.id);
@@ -123,6 +130,21 @@ async function updateUI() {
   // Update checkboxes based on current domain
   autoRunCheckbox.checked = enabledDomains.includes(currentDomain);
   caseInsensitiveCheckbox.checked = caseInsensitiveDomains.includes(currentDomain);
+
+  // Update API token display - show configured message or input field
+  // Skip this if user is currently editing the token
+  if (!isEditingToken) {
+    if (apiToken && apiToken.length > 0) {
+      // Token is configured - show "Token configured" message
+      if (tokenConfigured) tokenConfigured.style.display = "block";
+      if (tokenInput) tokenInput.style.display = "none";
+    } else {
+      // No token - show input field
+      if (tokenConfigured) tokenConfigured.style.display = "none";
+      if (tokenInput) tokenInput.style.display = "block";
+      if (apiTokenInput) apiTokenInput.value = "";
+    }
+  }
 }
 
 // Set working state
@@ -253,6 +275,75 @@ async function handleCaseInsensitiveChange(event: Event) {
   }
 }
 
+// API token input handler with debounce
+let tokenInputTimeout: number | null = null;
+async function handleApiTokenInput(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const tokenStatus = document.getElementById("tokenStatus");
+
+  // Mark that we're editing the token to prevent updateUI from interfering
+  isEditingToken = true;
+
+  // Clear previous timeout
+  if (tokenInputTimeout) {
+    clearTimeout(tokenInputTimeout);
+  }
+
+  // Debounce the save operation
+  tokenInputTimeout = window.setTimeout(async () => {
+    const token = input.value.trim();
+
+    // Save to storage
+    await chrome.storage.local.set({ [BGG_API_TOKEN_KEY]: token });
+
+    // Show saved status
+    if (tokenStatus) {
+      if (token && token.length > 0) {
+        tokenStatus.textContent = "Token saved!";
+        tokenStatus.className = "token-status saved";
+
+        // Hide status and update UI after 1 second
+        setTimeout(() => {
+          tokenStatus.className = "token-status";
+          isEditingToken = false; // Allow UI updates again
+          updateUI(); // Refresh to show the configured state
+        }, 1000);
+      } else {
+        tokenStatus.textContent = "Token cleared";
+        tokenStatus.className = "token-status saved";
+
+        // Hide status after 1 second
+        setTimeout(() => {
+          tokenStatus.className = "token-status";
+          isEditingToken = false; // Allow UI updates again
+        }, 1000);
+      }
+    }
+  }, 500); // Wait 500ms after user stops typing
+}
+
+// Handle clicking "Change" link to edit token
+async function handleChangeTokenClick(event: Event) {
+  event.preventDefault();
+  const tokenConfigured = document.getElementById("tokenConfigured");
+  const tokenInputDiv = document.getElementById("tokenInput");
+  const apiTokenInput = document.getElementById("apiTokenInput") as HTMLInputElement;
+
+  // Mark that we're editing the token
+  isEditingToken = true;
+
+  // Get current token from storage to populate the field
+  const result = await chrome.storage.local.get([BGG_API_TOKEN_KEY]);
+  const currentToken = result[BGG_API_TOKEN_KEY] || '';
+
+  if (tokenConfigured) tokenConfigured.style.display = "none";
+  if (tokenInputDiv) tokenInputDiv.style.display = "block";
+  if (apiTokenInput) {
+    apiTokenInput.value = currentToken;
+    apiTokenInput.focus(); // Focus the input for immediate editing
+  }
+}
+
 // Listen for messages from content script about working state
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "setWorkingState" && sender.tab?.id) {
@@ -295,10 +386,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   const mainButton = document.getElementById("mainButton");
   const autoRunCheckbox = document.getElementById("autoRunCheckbox");
   const caseInsensitiveCheckbox = document.getElementById("caseInsensitiveCheckbox");
+  const apiTokenInput = document.getElementById("apiTokenInput");
+  const changeTokenLink = document.getElementById("changeTokenLink");
 
   mainButton?.addEventListener("click", handleMainButtonClick);
   autoRunCheckbox?.addEventListener("change", handleAutoRunChange);
   caseInsensitiveCheckbox?.addEventListener("change", handleCaseInsensitiveChange);
+  apiTokenInput?.addEventListener("input", handleApiTokenInput);
+  changeTokenLink?.addEventListener("click", handleChangeTokenClick);
 
   // Refresh UI periodically to catch working state changes
   setInterval(updateUI, 500);
