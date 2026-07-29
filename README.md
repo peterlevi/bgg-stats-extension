@@ -38,26 +38,30 @@ Vibe-coded using PyCharm and Claude Sonnet 4.5. Code style is terrible, but func
 ## How It Works
 
 The extension:
-1. Fetches the board games with at least 50 user ratings from BoardGameGeek's API
-2. Caches the data locally (refreshes every 7 days)
-3. Searches the webpage for game name mentions using regex matching
+1. Downloads BoardGameGeek's game/expansion data dump (a zipped CSV) from the logged-in BGG data-dumps page, and caches it locally (refreshes every 7 days)
+2. On product-listing pages, detects the repeating product grid structurally, then resolves each product's full title (and URL slug) to the correct BGG game — including expansions and newer, low-rated titles
+3. Elsewhere, falls back to a guarded text scan for popular, distinctive game names
 4. Injects inline rating badges and interactive tooltips
 5. Uses URL change detection to handle dynamic content and SPAs
+
+> **Note:** The data-dump download requires you to be signed in to BoardGameGeek in the same browser (the extension reuses your session).
 
 ## Technical Stack
 
 - **TypeScript** - Type-safe development
 - **Webpack** - Module bundling
 - **Chrome Extension APIs** - Browser integration
-- **BoardGameGeek XML API** - Game data source
+- **BoardGameGeek data dump** - Primary game data source (zipped CSV)
+- **BoardGameGeek XML API** - On-demand details for tooltips
 
 ## Project Structure
 
 ```
 bgg-stats-extension/
 ├── src/
-│   ├── background.ts      # Service worker, data fetching
-│   ├── content.tsx        # Content script, badge injection
+│   ├── background.ts      # Service worker, data dump download & caching
+│   ├── content.tsx        # Content script, structural detection & badge injection
+│   ├── matching.ts        # Title normalization & game-resolution logic
 │   ├── popup.ts           # Extension popup UI
 │   ├── tooltip.tsx        # Game info tooltip component
 │   └── utils.tsx          # Shared utilities
@@ -85,13 +89,13 @@ npm run build
 - **URL Change Detection**: Monitors `pushState`, `replaceState`, and `popstate` events plus polling fallback
 - **Performance Optimization**: Temporary mutation observers that disconnect after processing to prevent page freezing
 - **Smart Caching**: 7-day cache with automatic background refresh
-- **Flexible Matching**: Configurable case-sensitive/insensitive matching per domain
+- **Structural Matching**: Detects repeating product-grid records and resolves each full title to a BGG game via exact + idf-weighted fuzzy token matching (using the visible title and the URL slug); a guarded, popularity-gated text scan handles non-grid pages
 
 ## Known Limitations
 
-- Only limits the logic to games with a certain number of user ratings on BGG, for better performance
-- Requires a fairly quick periodic data refresh (every 7 days), handled automatically
-- Game name matching may not be perfect for all edge cases
+- The data-dump download requires being signed in to BoardGameGeek in the browser
+- Requires a periodic data refresh (every 7 days), handled automatically
+- Titles that appear only in a local translation with no English text or slug (e.g. some purely Bulgarian editions) may not resolve, or may match a same-named game
 - Performance depends on page complexity and number of games found
 
 ## Contributing

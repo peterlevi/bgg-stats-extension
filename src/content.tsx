@@ -1,5 +1,6 @@
 import { getRatingColor } from './utils';
 import { wireTooltip } from './tooltip';
+import { buildGameIndex, resolveProductTitle, GameIndex } from './matching';
 
 interface GameData {
   id: string;
@@ -7,10 +8,15 @@ interface GameData {
   rank: string;
   average: string;
   yearpublished: string;
+  usersrated?: string;
 }
+
+// Minimum ratings for the free-text fallback path (grids use the full index).
+const TEXT_SCAN_MIN_VOTES = 100;
 
 // Global state for mutation observer and game data
 let currentBggData: GameData[] | null = null;
+let gameIndex: GameIndex | null = null;
 let urlChangeObserver: MutationObserver | null = null;
 let urlChangeTimeout: NodeJS.Timeout | null = null;
 let currentUrl: string = window.location.href;
@@ -40,15 +46,56 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// A name is "distinctive" enough to match case-insensitively when it is either
+// multi-word or a longish single word. Short, common single words (e.g. "War",
+// "Go", "City", "RED") stay case-sensitive to avoid matching random prose.
+function isDistinctiveName(name: string): boolean {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const alnumLen = name.replace(/[^A-Za-z0-9]/g, '').length;
+  return words.length >= 2 || alnumLen >= 6;
+}
+
+// Build a regex body that matches the game name while tolerating the whitespace
+// differences shops introduce around punctuation. For example the BGG name
+// "World Order: Diplomacy & Dominance" must match a page that renders it as
+// "World Order : Diplomacy & Dominance" (space before the colon). Without this,
+// only the base game "World Order" would match, badging the prefix instead of
+// the full expansion title.
+function buildFlexibleNamePattern(name: string): string {
+  // Split into alphanumeric tokens and separator runs (spaces + punctuation).
+  const parts = name.match(/[A-Za-z0-9]+|[^A-Za-z0-9]+/g) || [];
+  let pattern = '';
+  for (const part of parts) {
+    if (/^[A-Za-z0-9]+$/.test(part)) {
+      pattern += escapeRegex(part);
+    } else {
+      const punct = part.replace(/\s+/g, ''); // punctuation only, spaces stripped
+      if (punct === '') {
+        // Separator was pure whitespace -> require at least one space.
+        pattern += '\\s+';
+      } else {
+        // Punctuation with optional surrounding whitespace on both sides
+        // and between consecutive punctuation characters.
+        pattern += '\\s*' + Array.from(punct).map(escapeRegex).join('\\s*') + '\\s*';
+      }
+    }
+  }
+  return pattern;
+}
+
 // Helper function to create a regex pattern that handles punctuation in game names
 function createGameNameRegex(gameName: string): RegExp {
-  const escapedName = escapeRegex(gameName);
-  // Use lookbehind and lookahead assertions to match word boundaries
-  // Match if preceded by start of string, whitespace, or punctuation
-  // and followed by end of string, whitespace, or punctuation
-  // Use case-insensitive flag if enabled
-  const flags = useCaseInsensitive ? 'gi' : 'g';
-  return new RegExp(`(?<=^|\\s|[.!?,:;'"()\\[\\]{}])${escapedName}(?=$|\\s|[.!?,:;'"()\\[\\]{}])`, flags);
+  const body = buildFlexibleNamePattern(gameName);
+  // Match the game name only when it is not glued to another alphanumeric
+  // character (i.e. it is a whole "token", not part of a longer word). Any
+  // whitespace, punctuation, dash, slash, symbol, or non-Latin letter counts as
+  // a boundary, so titles surrounded by things like "–", "/", "™", digits, or
+  // Cyrillic text on Bulgarian shops are matched correctly.
+  // Distinctive (multi-word / long) names match case-insensitively so that
+  // ALL-CAPS product titles like "CODENAMES DUET" are caught; short common
+  // words stay case-sensitive unless the domain opted into case-insensitive.
+  const flags = (useCaseInsensitive || isDistinctiveName(gameName)) ? 'gi' : 'g';
+  return new RegExp(`(?<![A-Za-z0-9])${body}(?![A-Za-z0-9])`, flags);
 }
 
 // Helper function to create hexagon badge
@@ -80,6 +127,131 @@ function createRatingBadge(
   badge.textContent = displayRating;
 
   return badge;
+}
+
+// ---------------------------------------------------------------------------
+// Structural (product-grid) detection
+// ---------------------------------------------------------------------------
+
+interface ProductTile {
+  tile: HTMLElement;
+  titleEl: HTMLElement;
+  titleText: string;
+  slug: string;
+}
+
+// Signature of an element for grouping siblings: tag + stable class tokens
+// (drop dynamic/state classes so grid items still group together).
+function elementSignature(el: Element): string {
+  const cls = Array.from(el.classList)
+    .filter(c => !/^\d/.test(c) && !/(active|hover|selected|open|current|show|hidden|lazy|loaded|first|last|even|odd)/i.test(c))
+    .sort()
+    .join('.');
+  return el.tagName + '|' + cls;
+}
+
+function slugFromHref(href: string): string {
+  if (!href) return '';
+  try {
+    const path = href.split('?')[0].split('#')[0];
+    const parts = path.split('/').filter(Boolean);
+    return (parts.pop() || '').replace(/\.(html?|php|aspx)$/i, '');
+  } catch {
+    return '';
+  }
+}
+
+// Pick the element within a tile most likely to hold the product title.
+function findTitleElement(tile: HTMLElement): HTMLElement | null {
+  const byClass = tile.querySelector<HTMLElement>('[class*="title" i], [class*="name" i]');
+  if (byClass && (byClass.textContent || '').trim().length >= 2) return byClass;
+  const heading = tile.querySelector<HTMLElement>('h1, h2, h3, h4, h5');
+  if (heading && (heading.textContent || '').trim().length >= 2) return heading;
+  // Longest-text anchor that links somewhere (product link)
+  let best: HTMLElement | null = null;
+  let bestLen = 0;
+  tile.querySelectorAll<HTMLElement>('a[href]').forEach(a => {
+    const len = (a.textContent || '').trim().length;
+    if (len > bestLen && len <= 160) { best = a; bestLen = len; }
+  });
+  return best;
+}
+
+// Detect repeating product tiles across the page (all qualifying grids).
+function findProductTiles(): ProductTile[] {
+  const tiles: ProductTile[] = [];
+  const seen = new Set<HTMLElement>();
+
+  const parents = document.querySelectorAll('*');
+  for (const parent of Array.from(parents)) {
+    const kids = Array.from(parent.children) as HTMLElement[];
+    if (kids.length < 5) continue;
+    const bySig = new Map<string, HTMLElement[]>();
+    for (const k of kids) {
+      const s = elementSignature(k);
+      const arr = bySig.get(s) || [];
+      arr.push(k);
+      bySig.set(s, arr);
+    }
+    for (const group of bySig.values()) {
+      if (group.length < 5) continue;
+      // Product tiles contain both a link and an image
+      const productish = group.filter(e => e.querySelector('a[href]') && e.querySelector('img'));
+      if (productish.length < 5) continue;
+      for (const tile of productish) {
+        if (seen.has(tile)) continue;
+        seen.add(tile);
+        const titleEl = findTitleElement(tile);
+        if (!titleEl) continue;
+        const linkEl =
+          (titleEl.matches('a[href]') ? titleEl : titleEl.querySelector('a[href]')) ||
+          tile.querySelector('a[href]');
+        const slug = slugFromHref(linkEl ? (linkEl as HTMLAnchorElement).getAttribute('href') || '' : '');
+        tiles.push({
+          tile,
+          titleEl,
+          titleText: (titleEl.textContent || '').replace(/\s+/g, ' ').trim(),
+          slug,
+        });
+      }
+    }
+  }
+  return tiles;
+}
+
+// Prepend a rating badge to a resolved product-tile title (badge the record
+// once, rather than surgically wrapping a substring).
+function badgeTile(tile: ProductTile, game: GameData): boolean {
+  const { titleEl } = tile;
+  if (titleEl.closest('[data-bgg-tile]') || titleEl.querySelector('[data-bgg-rating-badge]')) {
+    return false;
+  }
+  const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
+  titleEl.insertBefore(badge, titleEl.firstChild);
+  titleEl.setAttribute('data-bgg-tile', 'true');
+  try {
+    wireTooltip(titleEl, game.id);
+  } catch (e) {
+    // tooltip is best-effort
+  }
+  return true;
+}
+
+// Structural pass: resolve each product tile to a game via the full index.
+function runStructuralPass(): number {
+  if (!gameIndex) return 0;
+  const tiles = findProductTiles();
+  if (tiles.length === 0) return 0;
+  let badged = 0;
+  for (const tile of tiles) {
+    if (!tile.titleText && !tile.slug) continue;
+    if (tile.titleEl.hasAttribute('data-bgg-tile')) continue;
+    const res = resolveProductTitle(tile.titleText, tile.slug, gameIndex);
+    if (!res) continue;
+    if (badgeTile(tile, res.game as GameData)) badged++;
+  }
+  console.log(`Content: Structural pass badged ${badged}/${tiles.length} product tiles`);
+  return badged;
 }
 
 // Process the entire page for game badges
@@ -121,7 +293,26 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
   msgDiv.textContent = 'Searching for board games...';
 
   try {
-    // Find games mentioned on the page
+    // Build the game index once (shared by structural matching).
+    if (!gameIndex && currentBggData) {
+      const idxStart = performance.now();
+      gameIndex = buildGameIndex(currentBggData as any);
+      console.log(`Content: [TIMING] Built game index in ${(performance.now() - idxStart).toFixed(2)}ms`);
+    }
+
+    // 1) STRUCTURAL PASS: resolve product-grid tiles to full titles (high
+    //    precision; allows niche/low-vote games because structure proves the
+    //    tile is a product).
+    let structuralBadges = 0;
+    try {
+      structuralBadges = runStructuralPass();
+    } catch (e) {
+      console.warn('Content: structural pass error', e);
+    }
+
+    // 2) GUARDED FREE-TEXT FALLBACK: scan remaining page text, but only for
+    //    popular, distinctive names, and never inside product tiles already
+    //    handled structurally.
     const searchStartTime = performance.now();
     const pageText = document.body.innerText;
     const pageTextTime = performance.now();
@@ -130,6 +321,9 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
     const foundGames: GameData[] = [];
 
     for (const gameData of currentBggData) {
+      const votes = parseInt(gameData.usersrated || '0', 10) || 0;
+      if (votes < TEXT_SCAN_MIN_VOTES) continue; // popularity gate on free text
+      if (!isDistinctiveName(gameData.name)) continue; // avoid short common words
       try {
         const regex = createGameNameRegex(gameData.name);
         if (regex.test(pageText)) {
@@ -142,10 +336,14 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
 
     const searchEndTime = performance.now();
     console.log(`Content: [TIMING] Searching for games took ${(searchEndTime - pageTextTime).toFixed(2)}ms`);
-    console.log(`Content: Found ${foundGames.length} games mentioned on page`);
+    console.log(`Content: Found ${foundGames.length} games mentioned on page (fallback)`);
 
     if (foundGames.length === 0) {
-      msgDiv.textContent = 'No board games found on this page.';
+      if (structuralBadges > 0) {
+        msgDiv.textContent = `Added ${structuralBadges} badge${structuralBadges !== 1 ? 's' : ''}`;
+      } else {
+        msgDiv.textContent = 'No board games found on this page.';
+      }
       setTimeout(() => {
         msgDiv.style.display = 'none';
       }, 2000);
@@ -185,11 +383,15 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
               }
               if (
                 parent.querySelector('[data-bgg-rating-badge]') ||
-                parent.closest('[data-bgg-wrapper]')
+                parent.closest('[data-bgg-wrapper]') ||
+                parent.closest('[data-bgg-tile]')
               ) {
                 return NodeFilter.FILTER_REJECT;
               }
-              return regex.test(node.textContent || '')
+              // NOTE: use String.search (stateless) instead of regex.test.
+              // The regex is global ('g'), and regex.test() mutates lastIndex,
+              // which would cause valid text nodes to be skipped intermittently.
+              return (node.textContent || '').search(regex) !== -1
                 ? NodeFilter.FILTER_ACCEPT
                 : NodeFilter.FILTER_REJECT;
             },
@@ -201,7 +403,9 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
 
         while ((currentNode = walker.nextNode())) {
           const textNode = currentNode as Text;
-          if (textNode.textContent?.match(regex)) {
+          // String.match with a global regex is stateless (it ignores/resets
+          // lastIndex), so this is safe to reuse the same regex object.
+          if ((textNode.textContent || '').match(regex)) {
             nodesToProcess.push({ node: textNode });
           }
         }
@@ -214,53 +418,63 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
 
           if (
             parent.querySelector('[data-bgg-rating-badge]') ||
-            parent.closest('[data-bgg-wrapper]')
+            parent.closest('[data-bgg-wrapper]') ||
+            parent.closest('[data-bgg-tile]')
           ) {
             return;
           }
 
           const text = node.textContent || '';
-          const match = regex.exec(text);
-          if (!match) return;
+          // Badge every occurrence in this text node (not just the first).
+          // matchAll requires a global regex and is stateless per call.
+          const matches = Array.from(text.matchAll(regex));
+          if (matches.length === 0) return;
 
-          const matchIndex = match.index;
-          const matchText = match[0];
+          const fragment = document.createDocumentFragment();
+          let lastIndex = 0;
 
-          const beforeText = text.substring(0, matchIndex);
-          const afterText = text.substring(matchIndex + matchText.length);
+          for (const match of matches) {
+            const matchIndex = match.index ?? 0;
+            const matchText = match[0];
+            if (!matchText) continue;
 
-          const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
-          const matchNode = document.createTextNode(matchText);
+            // Text between the previous match and this one
+            if (matchIndex > lastIndex) {
+              fragment.appendChild(
+                document.createTextNode(text.substring(lastIndex, matchIndex))
+              );
+            }
 
-          const wrapper = document.createElement('span');
-          wrapper.setAttribute('data-bgg-wrapper', 'true');
-          wrapper.style.cssText = `
-            background-color: #e6f2ff;
-            padding: 1px 3px;
-            border-radius: 2px;
-            display: inline;
-            line-height: inherit;
-          `;
-          wrapper.appendChild(badge);
-          wrapper.appendChild(matchNode);
+            const badge = createRatingBadge(game.average, game.rank, game.yearpublished);
+            const matchNode = document.createTextNode(matchText);
 
-          wireTooltip(wrapper, game.id);
+            const wrapper = document.createElement('span');
+            wrapper.setAttribute('data-bgg-wrapper', 'true');
+            wrapper.style.cssText = `
+              background-color: #e6f2ff;
+              padding: 1px 3px;
+              border-radius: 2px;
+              display: inline;
+              line-height: inherit;
+            `;
+            wrapper.appendChild(badge);
+            wrapper.appendChild(matchNode);
 
-          // Insert nodes using insertBefore instead of replaceChild
-          // This works better with all types of parent elements
-          if (beforeText) {
-            const beforeNode = document.createTextNode(beforeText);
-            parent.insertBefore(beforeNode, node);
+            wireTooltip(wrapper, game.id);
+
+            fragment.appendChild(wrapper);
+            lastIndex = matchIndex + matchText.length;
+            totalBadgesAdded++;
           }
-          parent.insertBefore(wrapper, node);
-          if (afterText) {
-            const afterNode = document.createTextNode(afterText);
-            parent.insertBefore(afterNode, node);
+
+          // Trailing text after the last match
+          if (lastIndex < text.length) {
+            fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
           }
-          // Now remove the original text node
+
+          // Replace the original text node with the badged fragment
+          parent.insertBefore(fragment, node);
           parent.removeChild(node);
-
-          totalBadgesAdded++;
         });
         const replaceEndTime = performance.now();
 
@@ -283,10 +497,11 @@ async function processBadgesForPage(messageDiv?: HTMLElement) {
     const badgeEndTime = performance.now();
     console.log(`Content: [TIMING] Adding badges took ${(badgeEndTime - badgeStartTime).toFixed(2)}ms`);
 
-    console.log(`Content: Added ${totalBadgesAdded} badges for ${foundGames.length} games to the page.`);
+    console.log(`Content: Added ${totalBadgesAdded} fallback badges for ${foundGames.length} games to the page.`);
 
-    if (totalBadgesAdded > 0) {
-      msgDiv.textContent = `Added ${totalBadgesAdded} badge${totalBadgesAdded !== 1 ? 's' : ''}`;
+    const grandTotal = totalBadgesAdded + structuralBadges;
+    if (grandTotal > 0) {
+      msgDiv.textContent = `Added ${grandTotal} badge${grandTotal !== 1 ? 's' : ''}`;
       setTimeout(() => {
         msgDiv.style.display = 'none';
       }, 2000);
@@ -587,6 +802,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Remove all badges and wrappers
     const badges = document.querySelectorAll('[data-bgg-rating-badge]');
     const wrappers = document.querySelectorAll('[data-bgg-wrapper]');
+    const tiles = document.querySelectorAll('[data-bgg-tile]');
 
     wrappers.forEach(wrapper => {
       // Get the text content (excluding badge) and replace wrapper with text node
@@ -599,9 +815,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       wrapper.parentNode?.replaceChild(textNode, wrapper);
     });
 
+    // Clear structural tile markers so they can be re-badged next run
+    tiles.forEach(tile => tile.removeAttribute('data-bgg-tile'));
+
     badges.forEach(badge => badge.remove());
 
-    console.log(`Content: Removed ${wrappers.length} wrappers and ${badges.length} badges`);
+    console.log(`Content: Removed ${wrappers.length} wrappers, ${tiles.length} tiles and ${badges.length} badges`);
 
 
     sendResponse({ success: true });

@@ -5,9 +5,12 @@ const CACHE_KEY = "bggGameData";
 const LAST_FETCH_TIMESTAMP_KEY = "lastBggFetchTimestamp";
 const CACHE_VERSION_KEY = "bggCacheVersion";
 const ENABLED_DOMAINS_KEY = "bggEnabledDomains";
-const CURRENT_CACHE_VERSION = 4; // Increment this when changing data structure or filtering logic
+const CURRENT_CACHE_VERSION = 5; // Increment this when changing data structure or filtering logic
 const ONE_WEEK_IN_MS = 7 * 24 * 60 * 60 * 1000;
-const MIN_VOTES_THRESHOLD = 100; // Minimum number of user ratings required to include a game
+// Low floor so structural (product-grid) matching can resolve niche/new titles
+// and expansions. The content script applies a higher threshold only on the
+// free-text fallback path, where precision matters more.
+const MIN_VOTES_THRESHOLD = 5; // Minimum number of user ratings required to include a game
 const BGG_DATA_PAGE_URL = "https://boardgamegeek.com/data_dumps/bg_ranks";
 
 function decodeHtmlEntities(text: string): string {
@@ -17,6 +20,36 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'");
+}
+
+// Extracts the .zip data-dump download URL from the BGG data dumps page HTML.
+// The page renders an anchor like:
+//   <a href="https://geek-export-stats.s3.amazonaws.com/.../boardgames_ranks_YYYY-MM-DD.zip?..." download="...">Click to Download</a>
+// We look for any anchor href that points to a .zip file, preferring the S3
+// export bucket, and fall back to the "Click to Download" link text. This keeps
+// working even if BGG tweaks the link wording or attribute order.
+function extractZipDownloadUrl(html: string): string | null {
+  const hrefRegex = /<a\b[^>]*?href=["']([^"']+?\.zip(?:\?[^"']*)?)["'][^>]*>/gi;
+  let match: RegExpExecArray | null;
+  let firstZipUrl: string | null = null;
+
+  while ((match = hrefRegex.exec(html)) !== null) {
+    const rawHref = match[1];
+    // Ignore protocol-relative/relative hrefs that aren't real downloads
+    if (!/^https?:\/\//i.test(rawHref)) {
+      continue;
+    }
+    const url = decodeHtmlEntities(rawHref);
+    if (firstZipUrl === null) {
+      firstZipUrl = url;
+    }
+    // Prefer the known BGG export bucket if present
+    if (/geek-export-stats|boardgames?_ranks|boardgames?_export/i.test(url)) {
+      return url;
+    }
+  }
+
+  return firstZipUrl;
 }
 
 interface GameData {
@@ -45,26 +78,29 @@ interface CompactGameData {
   rank: string;
   average: string;
   yearpublished: string;
+  usersrated: string;
 }
 
 function compactGameData(games: GameData[]): CompactGameData[] {
   console.log(`Background: Compacting ${games.length} games...`);
   const filtered = games
     .filter(game => {
-      // Include both games and expansions, but only if they have a valid rank and at least MIN_VOTES_THRESHOLD votes
+      // Include games and expansions that have a name and at least the minimum
+      // number of user ratings. We no longer require a main "rank" (expansions
+      // have none), so full expansion/edition titles are matchable.
       const usersRated = parseInt(game.usersrated, 10);
-      return game.rank &&
-             game.rank !== 'Not Ranked' &&
-             game.rank.trim() !== '' &&
+      return game.name &&
+             game.name.trim() !== '' &&
              !isNaN(usersRated) &&
              usersRated >= MIN_VOTES_THRESHOLD;
     })
     .map(game => ({
       id: game.id,
       name: game.name,
-      rank: game.rank,
+      rank: game.rank && game.rank.trim() !== '' ? game.rank : '',
       average: game.average,
       yearpublished: game.yearpublished,
+      usersrated: game.usersrated,
     }));
   console.log(`Background: Reduced to ${filtered.length} games with ${MIN_VOTES_THRESHOLD}+ votes (including expansions)`);
   return filtered;
@@ -166,23 +202,34 @@ async function getCachedBggData(): Promise<{ data: CompactGameData[] | null; isO
 async function fetchAndParseBggData(): Promise<CompactGameData[]> {
   console.log("Background: Fetching and parsing BGG data...");
   try {
-    // Step 1: Fetch the HTML page to find the actual download link
-    const pageResponse = await fetch(BGG_DATA_PAGE_URL);
+    // Step 1: Fetch the HTML page to find the actual download link.
+    // IMPORTANT: The download link is only present in the HTML when the user is
+    // logged in to BoardGameGeek. Since this request is issued cross-origin from
+    // the extension service worker, we must pass credentials: 'include' so that
+    // the user's BGG session cookies are sent (otherwise BGG returns the
+    // logged-out page, which does not contain the link).
+    const pageResponse = await fetch(BGG_DATA_PAGE_URL, {
+      credentials: "include",
+      cache: "no-store",
+    });
     if (!pageResponse.ok) {
       throw new Error(`HTTP error fetching BGG data page! status: ${pageResponse.status}`);
     }
     const pageText = await pageResponse.text();
 
-    // Step 2: Parse the HTML to find the .zip download link using a more robust regex
-    const zipLinkRegex = /<a[^>]*href=["'](https?:\/\/[^"']+\.zip[^"']*)["'][^>]*>\s*Click to Download\s*<\/a>/i;
-    const match = pageText.match(zipLinkRegex);
+    // Step 2: Parse the HTML to find the .zip download link.
+    // Match any anchor whose href points to a .zip file (the download button on
+    // the BGG data dumps page). We do NOT rely on the exact "Click to Download"
+    // link text, so the extension keeps working if BGG tweaks the wording.
+    const zipFileUrl = extractZipDownloadUrl(pageText);
 
-    if (!match || !match[1]) {
-      throw new Error("Could not find the \"Click to Download\" .zip link on the BGG data page.");
+    if (!zipFileUrl) {
+      throw new Error(
+        "Could not find the .zip download link on the BGG data page. " +
+        "Make sure you are logged in to BoardGameGeek (boardgamegeek.com) in this browser, " +
+        "then try again."
+      );
     }
-
-    // Decode HTML entities (e.g., &amp; -> &) before using the URL
-    const zipFileUrl = decodeHtmlEntities(match[1]);
     console.log("Background: Found BGG zip file URL:", zipFileUrl);
 
     // Step 3: Fetch the actual zipped CSV file
